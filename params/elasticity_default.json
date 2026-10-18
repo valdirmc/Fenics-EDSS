@@ -1,0 +1,12 @@
+{
+  "L": 1.0,
+  "W": 0.2,
+  "nx": 16,
+  "ny": 4,
+  "nz": 4,
+  "E": 2.0e5,
+  "nu": 0.3,
+  "rho": 1.0,
+  "g_scale": 0.5,
+  "output": "/app/output/elasticity_param"
+}
