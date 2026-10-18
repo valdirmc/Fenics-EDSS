@@ -1,31 +1,45 @@
 #!/usr/bin/env python3
 """
 Template: Equação do Calor parametrizada
+Com validação de parâmetros e logging.
 """
 
 import json
 import sys
+import logging
 import numpy as np
 from mpi4py import MPI
 from dolfinx import mesh, fem, io
 from dolfinx.fem.petsc import LinearProblem
 import ufl
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+log = logging.getLogger("heat")
+
 def load_params(path=None):
     defaults = {
-        "nx": 32,
-        "ny": 32,
+        "nx": 32, "ny": 32,
         "source": 10.0,
         "output": "/app/output/heat_param"
     }
     if path and path.endswith(".json"):
+        log.info(f"Carregando parâmetros de {path}")
         with open(path) as f:
             defaults.update(json.load(f))
     return defaults
 
+def validate(p):
+    if p["nx"] < 1 or p["ny"] < 1:
+        raise ValueError("Divisões da malha devem ser >= 1")
+    if p["source"] < 0:
+        log.warning("Fonte de calor negativa (resfriamento)")
+    log.info("Parâmetros validados")
+
 def main():
     param_file = sys.argv[1] if len(sys.argv) > 1 else None
     p = load_params(param_file)
+    validate(p)
+    log.info(f"Parâmetros: nx={p['nx']}, ny={p['ny']}, source={p['source']}")
 
     domain = mesh.create_unit_square(MPI.COMM_WORLD, p["nx"], p["ny"], mesh.CellType.triangle)
     V = fem.functionspace(domain, ("Lagrange", 1))
@@ -53,6 +67,7 @@ def main():
     a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
     L = f * v * ufl.dx
 
+    log.info("Resolvendo sistema linear...")
     problem = LinearProblem(
         a, L, bcs=[bc],
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
@@ -73,11 +88,12 @@ def main():
         from dolfinx.io import VTKFile
         with VTKFile(domain.comm, f"{out_base}.pvd", "w") as vtk:
             vtk.write_function(uh)
-        print(f"PVD gerado: {out_base}.pvd")
+        log.info(f"PVD gerado: {out_base}.pvd")
     except Exception as e:
-        print(f"Aviso VTU: {e}")
+        log.warning(f"Não foi possível gerar VTU: {e}")
 
-    print(f"Calor parametrizado concluído. T_max = {uh.x.array.max():.4f}")
+    tmax = uh.x.array.max()
+    log.info(f"Concluído. T_max = {tmax:.4f}")
 
 if __name__ == "__main__":
     main()
