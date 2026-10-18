@@ -59,9 +59,18 @@ def build_mesh_from_inp(model, debug=0):
     return domain, node_map
 
 
+def get_material_for_element(model, elem_id):
+    """Retorna o material associado a um elemento via elset/solid section."""
+    for elset_name, elem_ids in model.elsets.items():
+        if elem_id in elem_ids:
+            mat_name = model.solid_sections.get(elset_name.upper())
+            if mat_name and mat_name.upper() in [k.upper() for k in model.materials.keys()]:
+                for name, mat in model.materials.items():
+                    if name.upper() == mat_name.upper():
+                        return mat
+    # Fallback: primeiro material
 def run_linear_static_step(model, step, output_base: str, debug: int = 0):
-    """Executa um step de estática linear."""
-    # Reusa a lógica existente, mas com as cargas do step
+    """Executa um step de estática linear com múltiplos materiais."""
     domain, node_map = build_mesh_from_inp(model, debug=debug)
     
     domain.topology.create_connectivity(0, domain.topology.dim)
@@ -69,9 +78,32 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0):
     
     V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
 
-    mat = next(iter(model.materials.values()))
-    E = default_scalar_type(mat.E if mat.E > 0 else 210000)
-    nu = default_scalar_type(mat.nu if mat.nu > 0 else 0.3)
+    # Materiais por célula (DG-0)
+    Q = fem.functionspace(domain, ("DG", 0))
+    E_func = fem.Function(Q)
+    nu_func = fem.Function(Q)
+    
+    # Mapeia elementos para células
+    elem_to_cell = {el.id: i for i, el in enumerate(model.elements.values())}
+    
+    for elset_name, elem_ids in model.elsets.items():
+        mat = get_material_for_element(model, elem_ids[0] if elem_ids else 0)
+        for eid in elem_ids:
+            if eid in elem_to_cell:
+                cell_idx = elem_to_cell[eid]
+                if cell_idx < len(E_func.x.array):
+                    E_func.x.array[cell_idx] = mat.E if mat.E > 0 else 210000
+                    nu_func.x.array[cell_idx] = mat.nu if mat.nu > 0 else 0.3
+    
+    E_func.x.scatter_forward()
+    nu_func.x.scatter_forward()
+    
+    if debug:
+        print(f"Materiais aplicados: E min={E_func.x.array.min():.0f}, max={E_func.x.array.max():.0f}")
+
+    # Propriedades como funções
+    E = E_func
+    nu = nu_func
     mu = E / (2.0 * (1.0 + nu))
     lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
 

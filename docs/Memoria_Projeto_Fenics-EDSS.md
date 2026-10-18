@@ -50,8 +50,8 @@ Repositório: https://github.com/valdirmc/Fenics-EDSS (branch `dev`)
 - Estática linear funcional
 - Condução térmica funcional
 - Debug controlado por `-debug=1`
-- Hiperelasticidade (Neo-Hooke) funcional com Newton
-- Múltiplos steps com saída `nome_N.pvd`
+- Múltiplos materiais por elset (DG-0) funcional
+- V1 completa: estática, térmica, hiperelasticidade, múltiplos steps e materiais
 
 ## Estrutura atual
 

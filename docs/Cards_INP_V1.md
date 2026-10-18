@@ -38,7 +38,7 @@
 | `*NSET` + `*BOUNDARY` | OK | OK |
 | `*CLOAD` | OK | OK |
 | `*DLOAD` | OK | OK (aproximação) |
-| `*ELSET` + múltiplos materiais | OK | Pendente |
+| Múltiplos materiais | OK | OK |
 | `*HEAT TRANSFER` | OK | OK |
 | `*NLGEOM` / Hiperelasticidade | OK | OK (Neo-Hooke) |
 
