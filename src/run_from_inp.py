@@ -15,7 +15,7 @@ import ufl
 import basix.ufl
 
 sys.path.insert(0, "/app/src")
-from inp_parser import parse_inp, summary
+from inp_parser import parse_inp, summary, Step
 
 
 def build_mesh_from_inp(model, debug=0):
@@ -59,7 +59,100 @@ def build_mesh_from_inp(model, debug=0):
     return domain, node_map
 
 
-def run_linear_static(inp_path: str, output_base: str, debug: int = 1):
+def run_linear_static_step(model, step, output_base: str, debug: int = 0):
+    """Executa um step de estática linear."""
+    # Reusa a lógica existente, mas com as cargas do step
+    domain, node_map = build_mesh_from_inp(model, debug=debug)
+    
+    domain.topology.create_connectivity(0, domain.topology.dim)
+    domain.topology.create_connectivity(domain.topology.dim, 0)
+    
+    V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
+
+    mat = next(iter(model.materials.values()))
+    E = default_scalar_type(mat.E if mat.E > 0 else 210000)
+    nu = default_scalar_type(mat.nu if mat.nu > 0 else 0.3)
+    mu = E / (2.0 * (1.0 + nu))
+    lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+
+    # BCs
+    bcs = []
+    coords = domain.geometry.x
+    fixed_nodes = set(bc.node for bc in model.boundary if bc.node in model.nodes)
+    
+    for nid in fixed_nodes:
+        n = model.nodes[nid]
+        def marker(x, nx=n.x, ny=n.y, nz=n.z):
+            return (np.isclose(x[0], nx, atol=1e-6) &
+                    np.isclose(x[1], ny, atol=1e-6) &
+                    np.isclose(x[2], nz, atol=1e-6))
+        dofs = fem.locate_dofs_geometrical(V, marker)
+        if len(dofs) > 0:
+            u_bc = fem.Function(V)
+            u_bc.x.array[:] = 0.0
+            bcs.append(fem.dirichletbc(u_bc, dofs))
+
+    # Formulação
+    def epsilon(u):
+        return ufl.sym(ufl.grad(u))
+
+    def sigma(u):
+        return lmbda * ufl.nabla_div(u) * ufl.Identity(len(u)) + 2.0 * mu * epsilon(u)
+
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    a = ufl.inner(sigma(u), epsilon(v)) * ufl.dx
+    L_form = ufl.dot(fem.Constant(domain, default_scalar_type((0.0, 0.0, 0.0))), v) * ufl.dx
+
+    a_form = fem.form(a)
+    L_compiled = fem.form(L_form)
+    A = assemble_matrix(a_form, bcs=bcs)
+    A.assemble()
+    b = assemble_vector(L_compiled)
+
+    # Cargas do step
+    for cl in step.loads:
+        if cl.node not in model.nodes:
+            continue
+        n = model.nodes[cl.node]
+        dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
+        node_idx = np.argmin(dist)
+        if dist[node_idx] > 1e-6:
+            continue
+        comp = cl.dof - 1
+        dof_comp = node_idx * 3 + comp
+        with b.localForm() as local:
+            if dof_comp < local.size:
+                local[dof_comp] += cl.value
+
+    apply_lifting(b, [a_form], [bcs])
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+    set_bc(b, bcs)
+
+    solver = PETSc.KSP().create(domain.comm)
+    solver.setOperators(A)
+    solver.setType("preonly")
+    solver.getPC().setType("lu")
+    uh = fem.Function(V)
+    solver.solve(b, uh.x.petsc_vec)
+    uh.x.scatter_forward()
+    uh.name = "displacement"
+
+    os.makedirs(os.path.dirname(output_base) or ".", exist_ok=True)
+    try:
+        from dolfinx.io import VTKFile
+        with VTKFile(domain.comm, f"{output_base}.pvd", "w") as vtk:
+            vtk.write_function(uh)
+        if debug:
+            print(f"PVD: {output_base}.pvd")
+    except Exception as e:
+        if debug:
+            print(f"Aviso: {e}")
+
+    norma = np.linalg.norm(uh.x.array)
+    if debug:
+        print(f"Norma: {norma:.6e}")
+    return uh
     """Executa estática linear."""
     model = parse_inp(inp_path)
     domain, node_map = build_mesh_from_inp(model, debug=debug)
@@ -187,20 +280,39 @@ def run_linear_static(inp_path: str, output_base: str, debug: int = 1):
 
 
 def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0):
-    """Ponto de entrada principal. Detecta o tipo de análise."""
+    """Ponto de entrada principal. Executa cada step separadamente."""
+    if not os.path.exists(inp_path):
+        print(f"ERRO: arquivo não encontrado: {inp_path}")
+        sys.exit(1)
+    
     model = parse_inp(inp_path, debug=debug)
     if debug:
         print(summary(model))
         print("---")
 
     base_name = os.path.splitext(os.path.basename(inp_path))[0]
-    output_base = os.path.join(output_dir, f"{base_name}_1")
-
-    if model.analysis_type == "heat":
-        from run_thermal import run_thermal
-        return run_thermal(inp_path, output_base, debug)
-    else:
-        return run_linear_static(inp_path, output_base, debug)
+    
+    # Se não houver steps, cria um padrão
+    if not model.steps:
+        model.steps.append(Step())
+    
+    results = []
+    for i, step in enumerate(model.steps):
+        step_num = i + 1
+        output_base = os.path.join(output_dir, f"{base_name}_{step_num}")
+        
+        if debug:
+            print(f"\n=== Step {step_num} ===")
+        
+        if model.analysis_type == "heat":
+            from run_thermal import run_thermal
+            result = run_thermal(inp_path, output_base, debug)
+        else:
+            # Passa o step para a função de estática
+            result = run_linear_static_step(model, step, output_base, debug)
+        results.append(result)
+    
+    return results
 
 
 if __name__ == "__main__":

@@ -55,6 +55,14 @@ class SurfaceLoad:
 
 
 @dataclass
+class Step:
+    loads: List[ConcentratedLoad] = field(default_factory=list)
+    dloads: List[SurfaceLoad] = field(default_factory=list)
+    nlgeom: bool = False
+    analysis_type: str = "static"
+
+
+@dataclass
 class INPModel:
     nodes: Dict[int, Node] = field(default_factory=dict)
     elements: Dict[int, Element] = field(default_factory=dict)
@@ -63,8 +71,7 @@ class INPModel:
     elsets: Dict[str, List[int]] = field(default_factory=dict)
     nsets: Dict[str, List[int]] = field(default_factory=dict)
     boundary: List[BoundaryCondition] = field(default_factory=list)
-    cloads: List[ConcentratedLoad] = field(default_factory=list)
-    dloads: List[SurfaceLoad] = field(default_factory=list)
+    steps: List[Step] = field(default_factory=list)
     analysis_type: str = "static"
     nlgeom: bool = False
 
@@ -73,7 +80,7 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
     """Lê um arquivo .inp e retorna um INPModel."""
     model = INPModel()
     current_material = None
-    current_section_elset = None
+    current_step = None
 
     with open(path, "r") as f:
         lines = f.readlines()
@@ -218,6 +225,28 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
                 i += 1
             continue
 
+        if upper.startswith("*STEP"):
+            current_step = Step()
+            model.steps.append(current_step)
+            i += 1
+            continue
+
+        if upper.startswith("*END STEP"):
+            current_step = None
+            i += 1
+            continue
+
+        if upper.startswith("*STATIC"):
+            if "NLGEOM" in upper:
+                model.nlgeom = True
+                if current_step:
+                    current_step.nlgeom = True
+            model.analysis_type = "static"
+            if current_step:
+                current_step.analysis_type = "static"
+            i += 1
+            continue
+
         if upper.startswith("*CLOAD"):
             i += 1
             while i < len(lines) and not lines[i].strip().startswith("*"):
@@ -226,22 +255,15 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
                     node = int(parts[0])
                     dof = int(parts[1])
                     value = float(parts[2])
-                    model.cloads.append(ConcentratedLoad(node, dof, value))
+                    cl = ConcentratedLoad(node, dof, value)
+                    if current_step:
+                        current_step.loads.append(cl)
+                    else:
+                        # Fora de step, adiciona ao primeiro step ou cria um
+                        if not model.steps:
+                            model.steps.append(Step())
+                        model.steps[0].loads.append(cl)
                 i += 1
-            continue
-
-        if upper.startswith("*HEAT TRANSFER"):
-            model.analysis_type = "heat"
-            if debug:
-                print(f"DEBUG: detectado HEAT TRANSFER")
-            i += 1
-            continue
-
-        if upper.startswith("*STATIC"):
-            model.analysis_type = "static"
-            if debug:
-                print(f"DEBUG: detectado STATIC")
-            i += 1
             continue
 
         i += 1
@@ -259,11 +281,12 @@ def summary(model: INPModel) -> str:
         f"Element sets: {list(model.elsets.keys())}",
         f"Node sets: {list(model.nsets.keys())}",
         f"Condições de contorno: {len(model.boundary)}",
-        f"Cargas concentradas: {len(model.cloads)}",
-        f"Cargas de superfície: {len(model.dloads)}",
+        f"Steps: {len(model.steps)}",
         f"Tipo de análise: {model.analysis_type}",
         f"NLGEOM: {model.nlgeom}",
     ]
+    for i, step in enumerate(model.steps):
+        lines.append(f"  Step {i+1}: {len(step.loads)} cargas, nlgeom={step.nlgeom}")
     return "\n".join(lines)
 
 
