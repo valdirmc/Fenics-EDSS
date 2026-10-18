@@ -40,8 +40,7 @@
 | `*DLOAD` | OK | OK (aproximação) |
 | `*ELSET` + múltiplos materiais | OK | Pendente |
 | `*HEAT TRANSFER` | OK | OK |
-| `*NLGEOM` | OK | Pendente |
-| Hiperelasticidade | Pendente | Pendente |
+| `*NLGEOM` / Hiperelasticidade | OK | OK (Neo-Hooke) |
 
 ## Exemplos
 - `examples/simple_beam.inp` — estática, BCs por nó

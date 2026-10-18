@@ -307,8 +307,10 @@ def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0)
         if model.analysis_type == "heat":
             from run_thermal import run_thermal
             result = run_thermal(inp_path, output_base, debug)
+        elif step.nlgeom or model.nlgeom:
+            from run_hyper import run_hyperelastic
+            result = run_hyperelastic(model, step, output_base, debug)
         else:
-            # Passa o step para a função de estática
             result = run_linear_static_step(model, step, output_base, debug)
         results.append(result)
     
