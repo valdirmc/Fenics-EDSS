@@ -51,7 +51,8 @@ class INPModel:
     nodes: Dict[int, Node] = field(default_factory=dict)
     elements: Dict[int, Element] = field(default_factory=dict)
     materials: Dict[str, Material] = field(default_factory=dict)
-    solid_sections: Dict[str, str] = field(default_factory=dict)  # elset -> material
+    solid_sections: Dict[str, str] = field(default_factory=dict)
+    nsets: Dict[str, List[int]] = field(default_factory=dict)  # nome -> lista de nós
     boundary: List[BoundaryCondition] = field(default_factory=list)
     cloads: List[ConcentratedLoad] = field(default_factory=list)
     analysis_type: str = "static"
@@ -124,15 +125,43 @@ def parse_inp(path: str) -> INPModel:
             i += 1
             continue
 
+        if upper.startswith("*NSET"):
+            match = re.search(r"NSET\s*=\s*(\w+)", upper)
+            if match:
+                nset_name = match.group(1)
+                model.nsets[nset_name] = []
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith("*"):
+                    parts = [p.strip() for p in lines[i].split(",") if p.strip()]
+                    for p in parts:
+                        try:
+                            model.nsets[nset_name].append(int(p))
+                        except ValueError:
+                            pass
+                    i += 1
+            continue
+
         if upper.startswith("*BOUNDARY"):
             i += 1
             while i < len(lines) and not lines[i].strip().startswith("*"):
                 parts = [p.strip() for p in lines[i].split(",")]
-                if len(parts) >= 4:
-                    node = int(parts[0])
-                    dof = int(parts[1])
-                    value = float(parts[3]) if parts[3] else 0.0
-                    model.boundary.append(BoundaryCondition(node, dof, value))
+                if len(parts) >= 3:
+                    target = parts[0]
+                    dof_start = int(parts[1])
+                    dof_end = int(parts[2]) if len(parts) > 2 and parts[2] else dof_start
+                    value = float(parts[3]) if len(parts) > 3 and parts[3] else 0.0
+                    # Expande o range de DOFs
+                    nodes_to_apply = []
+                    if target.isdigit():
+                        nodes_to_apply = [int(target)]
+                    else:
+                        for nset_name, nodes in model.nsets.items():
+                            if nset_name.upper() == target.upper():
+                                nodes_to_apply = nodes
+                                break
+                    for nid in nodes_to_apply:
+                        for dof in range(dof_start, dof_end + 1):
+                            model.boundary.append(BoundaryCondition(nid, dof, value))
                 i += 1
             continue
 
@@ -165,6 +194,7 @@ def summary(model: INPModel) -> str:
         f"Elementos: {len(model.elements)}",
         f"Materiais: {list(model.materials.keys())}",
         f"Seções sólidas: {model.solid_sections}",
+        f"Node sets: {list(model.nsets.keys())}",
         f"Condições de contorno: {len(model.boundary)}",
         f"Cargas concentradas: {len(model.cloads)}",
         f"Tipo de análise: {model.analysis_type}",

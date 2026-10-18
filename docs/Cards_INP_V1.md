@@ -23,7 +23,8 @@
 
 | Card | Sintaxe mínima | Suporte V1 |
 |------|----------------|------------|
-| `*BOUNDARY` | `*BOUNDARY` + `nó, dof, valor` | Sim |
+| `*NSET` | `*NSET, NSET=nome` + lista de nós | Sim |
+| `*BOUNDARY` | Nó ou nset, range de DOFs | Sim |
 | `*CLOAD` | `*CLOAD` + `nó, dof, força` | Sim |
 | `*DLOAD` | `*DLOAD` + `elset, P, pressão` | Sim |
 | `*DSLOAD` | `*DSLOAD` + fonte volumétrica | Sim (térmico) |

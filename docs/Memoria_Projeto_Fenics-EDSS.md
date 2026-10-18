@@ -38,6 +38,13 @@ Repositório: https://github.com/valdirmc/Fenics-EDSS (branch `dev`)
 - Parâmetros de exemplo em `params/`
 - Validação de parâmetros e logging adicionados
 
+### Sprint 3 — Parser `.inp` + Estática Linear (em andamento)
+- Parser de `.inp` (NODE, ELEMENT, MATERIAL, ELASTIC, SOLID SECTION, NSET, BOUNDARY, CLOAD, STATIC)
+- Suporte a `*NSET` e `*BOUNDARY` com nó individual ou node set
+- Reordenação de hexaedros CalculiX → DOLFINx/Basix
+- Estática linear funcional a partir de `.inp`
+- Saída `.pvd`
+
 ## Estrutura atual
 
 ```
