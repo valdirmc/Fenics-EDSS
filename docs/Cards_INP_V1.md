@@ -1,72 +1,61 @@
 # Cards `.inp` suportados na V1 — FeniCS-EDSS
 
-**Data:** 18/10/2026
+**Data:** 18/10/2026  
+**Status:** Implementado
 
 ## Malha
+| Card | Suporte |
+|------|---------|
+| `*NODE` | Sim |
+| `*ELEMENT` (C3D8, C3D4) | Sim |
 
-| Card | Sintaxe mínima | Suporte V1 |
-|------|----------------|------------|
-| `*NODE` | `*NODE` + linhas `id, x, y, z` | Sim |
-| `*ELEMENT` | `*ELEMENT, TYPE=C3D8` + conectividade | Sim (C3D8, C3D4, C3D10) |
-
-## Materiais
-
-| Card | Sintaxe mínima | Suporte V1 |
-|------|----------------|------------|
-| `*MATERIAL` | `*MATERIAL, NAME=nome` | Sim |
-| `*ELASTIC` | `*ELASTIC` + `E, nu` | Sim |
-| `*CONDUCTIVITY` | `*CONDUCTIVITY` + `k` | Sim (térmico) |
-| `*HYPERELASTIC` | `*HYPERELASTIC, NEO HOOKE` + `C10, D1` | Sim (não linear) |
-| `*SOLID SECTION` | `*SOLID SECTION, ELSET=..., MATERIAL=...` | Sim |
+## Materiais e seções
+| Card | Suporte |
+|------|---------|
+| `*MATERIAL` | Sim |
+| `*ELASTIC` | Sim |
+| `*SOLID SECTION` | Sim |
+| `*ELSET` | Sim |
+| `*NSET` | Sim |
 
 ## Condições de contorno e cargas
-
-| Card | Sintaxe mínima | Suporte V1 |
-|------|----------------|------------|
-| `*NSET` | `*NSET, NSET=nome` + lista de nós | Sim |
-| `*BOUNDARY` | Nó ou nset, range de DOFs | Sim |
-| `*CLOAD` | `*CLOAD` + `nó, dof, força` | Sim |
-| `*DLOAD` | `*DLOAD` + `elset, P, pressão` | Sim |
-| `*DSLOAD` | `*DSLOAD` + fonte volumétrica | Sim (térmico) |
+| Card | Suporte |
+|------|---------|
+| `*BOUNDARY` (nó ou nset, range de DOFs) | Sim |
+| `*CLOAD` | Sim |
+| `*DLOAD` | Parser ok, aplicação pendente |
 
 ## Análise
+| Card | Suporte |
+|------|---------|
+| `*STATIC` | Sim |
+| `*NLGEOM` | Parser ok |
 
-| Card | Sintaxe mínima | Suporte V1 |
-|------|----------------|------------|
-| `*STATIC` | `*STATIC` | Sim |
-| `*HEAT TRANSFER` | `*HEAT TRANSFER, STEADY STATE` | Sim |
-| `*NLGEOM` | `*NLGEOM` | Sim |
+## Status da implementação (18/10/2026)
 
-## Não suportados na V1
+| Recurso | Parser | Solver |
+|---------|--------|--------|
+| `*NSET` + `*BOUNDARY` | OK | OK |
+| `*CLOAD` | OK | OK |
+| `*DLOAD` | OK | OK (aproximação) |
+| `*ELSET` + múltiplos materiais | OK | Pendente |
+| `*HEAT TRANSFER` | OK | OK |
+| `*NLGEOM` | OK | Pendente |
+| Hiperelasticidade | Pendente | Pendente |
 
-- `*DYNAMIC`
-- `*FREQUENCY`
-- `*PLASTIC`
-- `*CONTACT`
-- Elementos de casca, viga, treliça
-- Análise acoplada termo-mecânica
+## Exemplos
+- `examples/simple_beam.inp` — estática, BCs por nó
+- `examples/beam_nset.inp` — estática, BCs por nset
+- `examples/beam_multimat.inp` — 2 materiais (parser)
+- `examples/beam_dload.inp` — pressão
+- `examples/beam_thermal.inp` — condução térmica
 
-## Exemplo mínimo (estática linear)
+## Uso
+```bash
+# Silencioso
+docker compose run --rm fenicsx python3 /app/src/run_from_inp.py /app/examples/beam_thermal.inp
 
+# Com debug
+docker compose run --rm fenicsx python3 /app/src/run_from_inp.py /app/examples/beam_thermal.inp -debug=1
 ```
-*NODE
-1, 0.0, 0.0, 0.0
-2, 1.0, 0.0, 0.0
-...
-*ELEMENT, TYPE=C3D8
-1, 1, 2, 3, 4, 5, 6, 7, 8
-...
-*MATERIAL, NAME=Aco
-*ELASTIC
-210000, 0.3
-*SOLID SECTION, ELSET=Eall, MATERIAL=Aco
-*BOUNDARY
-1, 1, 1, 0.0
-1, 2, 2, 0.0
-1, 3, 3, 0.0
-*CLOAD
-10, 3, -100.0
-*STEP
-*STATIC
-*END STEP
-```
+| Hiperelasticidade | Pendente | Pendente |

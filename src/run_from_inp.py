@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Executa estática linear a partir de um arquivo .inp.
-Usa o parser mínimo e monta o problema no DOLFINx.
+Executa análise a partir de um arquivo .inp.
+Detecta o tipo (estática ou térmica) e chama a função apropriada.
 """
 
 import sys
+import os
 import numpy as np
 from mpi4py import MPI
 from dolfinx import mesh, fem, io, default_scalar_type
@@ -36,9 +37,6 @@ def build_mesh_from_inp(model, debug=0):
         if el.type.upper() != etype:
             raise ValueError(f"Elementos mistos não suportados ({el.type} vs {etype})")
         nodes = [node_map[n] for n in el.nodes]
-        # Reordena hexaedro de CalculiX para DOLFINx/Basix
-        # CalculiX: 0,1,2,3,4,5,6,7
-        # DOLFINx:  0,1,3,2,4,5,7,6
         if etype == "C3D8" and len(nodes) == 8:
             nodes = [nodes[0], nodes[1], nodes[3], nodes[2],
                      nodes[4], nodes[5], nodes[7], nodes[6]]
@@ -61,9 +59,16 @@ def build_mesh_from_inp(model, debug=0):
     return domain, node_map
 
 
-def run_linear_static(inp_path: str, output_base: str = "/app/output/from_inp", debug: int = 1):
+def run_linear_static(inp_path: str, output_base: str, debug: int = 1):
+    """Executa estática linear."""
     model = parse_inp(inp_path)
-    # Material
+    domain, node_map = build_mesh_from_inp(model, debug=debug)
+    
+    domain.topology.create_connectivity(0, domain.topology.dim)
+    domain.topology.create_connectivity(domain.topology.dim, 0)
+    
+    V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
+
     mat = next(iter(model.materials.values()))
     E = default_scalar_type(mat.E)
     nu = default_scalar_type(mat.nu)
@@ -71,32 +76,11 @@ def run_linear_static(inp_path: str, output_base: str = "/app/output/from_inp", 
     lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
 
     if debug:
-        print(summary(model))
-        print("---")
         print(f"Material: E={mat.E}, nu={mat.nu}")
-        print(f"mu={float(mu):.2f}, lambda={float(lmbda):.2f}")
 
-    domain, node_map = build_mesh_from_inp(model, debug=debug)
-    
-    # Cria conectividades
-    domain.topology.create_connectivity(0, domain.topology.dim)
-    domain.topology.create_connectivity(domain.topology.dim, 0)
-    domain.topology.create_connectivity(domain.topology.dim - 1, domain.topology.dim)
-    
-    V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
-
-    # Material
-    mat = next(iter(model.materials.values()))
-    E = default_scalar_type(mat.E)
-    nu = default_scalar_type(mat.nu)
-    mu = E / (2.0 * (1.0 + nu))
-    lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
-
-    # Condições de contorno por nó/set
+    # BCs
     bcs = []
     coords = domain.geometry.x
-    
-    # Coleta nós únicos com BC
     fixed_nodes = set(bc.node for bc in model.boundary if bc.node in model.nodes)
     
     for nid in fixed_nodes:
@@ -112,7 +96,7 @@ def run_linear_static(inp_path: str, output_base: str = "/app/output/from_inp", 
             bcs.append(fem.dirichletbc(u_bc, dofs))
     
     if debug:
-        print(f"BCs aplicadas: {len(bcs)} (nós fixos: {len(fixed_nodes)})")
+        print(f"BCs aplicadas: {len(bcs)}")
 
     # Formulação
     def epsilon(u):
@@ -132,34 +116,44 @@ def run_linear_static(inp_path: str, output_base: str = "/app/output/from_inp", 
     A.assemble()
     b = assemble_vector(L_compiled)
 
-    if debug:
-        print(f"Vetor b (antes): norma = {b.norm():.6e}")
-
-    # Aplica CLOAD
+    # CLOAD
     if model.cloads:
-        coords = domain.geometry.x
         for cl in model.cloads:
             if cl.node not in model.nodes:
                 continue
             n = model.nodes[cl.node]
-            # Encontra o índice do nó na geometria
             dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
             node_idx = np.argmin(dist)
             if dist[node_idx] > 1e-6:
                 continue
-            # Para espaço vetorial Lagrange, os dofs são: node_idx * 3 + componente
             comp = cl.dof - 1
             dof_comp = node_idx * 3 + comp
             with b.localForm() as local:
                 if dof_comp < local.size:
                     local[dof_comp] += cl.value
-                    if debug:
-                        print(f"  CLOAD nó {cl.node}, comp {comp}: dof {dof_comp}")
         if debug:
-            print(f"Cargas aplicadas: {len(model.cloads)}")
+            print(f"CLOADs: {len(model.cloads)}")
 
-    if debug:
-        print(f"Vetor b (depois): norma = {b.norm():.6e}")
+    # DLOAD
+    if model.dloads:
+        for dl in model.dloads:
+            for elset_name, elem_ids in model.elsets.items():
+                if elset_name.upper() == dl.elset.upper():
+                    for eid in elem_ids:
+                        if eid in model.elements:
+                            for nid in model.elements[eid].nodes:
+                                if nid in model.nodes:
+                                    n = model.nodes[nid]
+                                    dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
+                                    node_idx = np.argmin(dist)
+                                    if dist[node_idx] < 1e-6:
+                                        dof_z = node_idx * 3 + 2
+                                        with b.localForm() as local:
+                                            if dof_z < local.size:
+                                                local[dof_z] += dl.value * 0.05
+                    break
+        if debug:
+            print(f"DLOADs: {len(model.dloads)}")
 
     apply_lifting(b, [a_form], [bcs])
     b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
@@ -175,32 +169,50 @@ def run_linear_static(inp_path: str, output_base: str = "/app/output/from_inp", 
     uh.name = "displacement"
 
     # Saída
-    import os
-    os.makedirs("/app/output", exist_ok=True)
-    with io.XDMFFile(domain.comm, f"{output_base}.xdmf", "w") as xdmf:
-        xdmf.write_mesh(domain)
-        xdmf.write_function(uh)
+    os.makedirs(os.path.dirname(output_base) or ".", exist_ok=True)
     try:
         from dolfinx.io import VTKFile
         with VTKFile(domain.comm, f"{output_base}.pvd", "w") as vtk:
             vtk.write_function(uh)
         if debug:
-            print(f"PVD gerado: {output_base}.pvd")
+            print(f"PVD: {output_base}.pvd")
     except Exception as e:
         if debug:
-            print(f"Aviso VTU: {e}")
+            print(f"Aviso: {e}")
 
     norma = np.linalg.norm(uh.x.array)
     if debug:
-        print(f"Norma do deslocamento: {norma:.6e}")
+        print(f"Norma: {norma:.6e}")
     return uh
 
 
+def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0):
+    """Ponto de entrada principal. Detecta o tipo de análise."""
+    model = parse_inp(inp_path, debug=debug)
+    if debug:
+        print(summary(model))
+        print("---")
+
+    base_name = os.path.splitext(os.path.basename(inp_path))[0]
+    output_base = os.path.join(output_dir, f"{base_name}_1")
+
+    if model.analysis_type == "heat":
+        from run_thermal import run_thermal
+        return run_thermal(inp_path, output_base, debug)
+    else:
+        return run_linear_static(inp_path, output_base, debug)
+
+
 if __name__ == "__main__":
-    debug = 1
-    if len(sys.argv) > 2 and sys.argv[2] == "--quiet":
-        debug = 0
-    if len(sys.argv) < 2:
-        print("Uso: python3 run_from_inp.py arquivo.inp [--quiet]")
+    debug = 0
+    args = sys.argv[1:]
+    inp_file = None
+    for arg in args:
+        if arg.startswith("-debug="):
+            debug = int(arg.split("=")[1])
+        elif not arg.startswith("-"):
+            inp_file = arg
+    if not inp_file:
+        print("Uso: python3 run_from_inp.py arquivo.inp [-debug=1]")
         sys.exit(1)
-    run_linear_static(sys.argv[1], debug=debug)
+    run_from_inp(inp_file, debug=debug)

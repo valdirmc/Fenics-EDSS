@@ -30,6 +30,7 @@ class Material:
     name: str
     E: float = 0.0
     nu: float = 0.0
+    k: float = 0.0  # condutividade térmica
 
 
 @dataclass
@@ -47,18 +48,28 @@ class ConcentratedLoad:
 
 
 @dataclass
+class SurfaceLoad:
+    elset: str
+    face: str
+    value: float
+
+
+@dataclass
 class INPModel:
     nodes: Dict[int, Node] = field(default_factory=dict)
     elements: Dict[int, Element] = field(default_factory=dict)
     materials: Dict[str, Material] = field(default_factory=dict)
     solid_sections: Dict[str, str] = field(default_factory=dict)
-    nsets: Dict[str, List[int]] = field(default_factory=dict)  # nome -> lista de nós
+    elsets: Dict[str, List[int]] = field(default_factory=dict)
+    nsets: Dict[str, List[int]] = field(default_factory=dict)
     boundary: List[BoundaryCondition] = field(default_factory=list)
     cloads: List[ConcentratedLoad] = field(default_factory=list)
+    dloads: List[SurfaceLoad] = field(default_factory=list)
     analysis_type: str = "static"
+    nlgeom: bool = False
 
 
-def parse_inp(path: str) -> INPModel:
+def parse_inp(path: str, debug: int = 0) -> INPModel:
     """Lê um arquivo .inp e retorna um INPModel."""
     model = INPModel()
     current_material = None
@@ -117,6 +128,15 @@ def parse_inp(path: str) -> INPModel:
             i += 1
             continue
 
+        if upper.startswith("*CONDUCTIVITY") and current_material:
+            i += 1
+            if i < len(lines):
+                parts = [p.strip() for p in lines[i].split(",")]
+                if parts:
+                    model.materials[current_material].k = float(parts[0])
+            i += 1
+            continue
+
         if upper.startswith("*SOLID SECTION"):
             match_elset = re.search(r"ELSET\s*=\s*(\w+)", upper)
             match_mat = re.search(r"MATERIAL\s*=\s*(\w+)", upper)
@@ -139,6 +159,39 @@ def parse_inp(path: str) -> INPModel:
                         except ValueError:
                             pass
                     i += 1
+            continue
+
+        if upper.startswith("*ELSET"):
+            match = re.search(r"ELSET\s*=\s*(\w+)", upper)
+            if match:
+                elset_name = match.group(1)
+                model.elsets[elset_name] = []
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith("*"):
+                    parts = [p.strip() for p in lines[i].split(",") if p.strip()]
+                    for p in parts:
+                        try:
+                            model.elsets[elset_name].append(int(p))
+                        except ValueError:
+                            pass
+                    i += 1
+            continue
+
+        if upper.startswith("*DLOAD"):
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("*"):
+                parts = [p.strip() for p in lines[i].split(",")]
+                if len(parts) >= 3:
+                    elset = parts[0]
+                    face = parts[1]
+                    value = float(parts[2])
+                    model.dloads.append(SurfaceLoad(elset, face, value))
+                i += 1
+            continue
+
+        if upper.startswith("*NLGEOM"):
+            model.nlgeom = True
+            i += 1
             continue
 
         if upper.startswith("*BOUNDARY"):
@@ -177,8 +230,17 @@ def parse_inp(path: str) -> INPModel:
                 i += 1
             continue
 
+        if upper.startswith("*HEAT TRANSFER"):
+            model.analysis_type = "heat"
+            if debug:
+                print(f"DEBUG: detectado HEAT TRANSFER")
+            i += 1
+            continue
+
         if upper.startswith("*STATIC"):
             model.analysis_type = "static"
+            if debug:
+                print(f"DEBUG: detectado STATIC")
             i += 1
             continue
 
@@ -194,10 +256,13 @@ def summary(model: INPModel) -> str:
         f"Elementos: {len(model.elements)}",
         f"Materiais: {list(model.materials.keys())}",
         f"Seções sólidas: {model.solid_sections}",
+        f"Element sets: {list(model.elsets.keys())}",
         f"Node sets: {list(model.nsets.keys())}",
         f"Condições de contorno: {len(model.boundary)}",
         f"Cargas concentradas: {len(model.cloads)}",
+        f"Cargas de superfície: {len(model.dloads)}",
         f"Tipo de análise: {model.analysis_type}",
+        f"NLGEOM: {model.nlgeom}",
     ]
     return "\n".join(lines)
 

@@ -38,12 +38,19 @@ Repositório: https://github.com/valdirmc/Fenics-EDSS (branch `dev`)
 - Parâmetros de exemplo em `params/`
 - Validação de parâmetros e logging adicionados
 
-### Sprint 3 — Parser `.inp` + Estática Linear (em andamento)
-- Parser de `.inp` (NODE, ELEMENT, MATERIAL, ELASTIC, SOLID SECTION, NSET, BOUNDARY, CLOAD, STATIC)
-- Suporte a `*NSET` e `*BOUNDARY` com nó individual ou node set
+### Sprint 3 — Parser `.inp` + Análises (concluído)
+- Parser de `.inp` com suporte a:
+  - `*NODE`, `*ELEMENT` (C3D8, C3D4)
+  - `*MATERIAL`, `*ELASTIC`, `*CONDUCTIVITY`
+  - `*NSET`, `*ELSET`, `*SOLID SECTION`
+  - `*BOUNDARY` (nó ou nset, range de DOFs)
+  - `*CLOAD`, `*DLOAD`
+  - `*STATIC`, `*HEAT TRANSFER`, `*NLGEOM`
 - Reordenação de hexaedros CalculiX → DOLFINx/Basix
-- Estática linear funcional a partir de `.inp`
-- Saída `.pvd`
+- Estática linear funcional
+- Condução térmica funcional
+- Debug controlado por `-debug=1`
+- Saída `.pvd` com sufixo `_N` por step
 
 ## Estrutura atual
 
