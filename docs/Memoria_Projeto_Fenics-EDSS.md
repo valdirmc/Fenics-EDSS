@@ -36,6 +36,7 @@ Repositório: https://github.com/valdirmc/Fenics-EDSS (branch `dev`)
 - Sistema de parâmetros via JSON
 - Script `scripts/run_template.sh`
 - Parâmetros de exemplo em `params/`
+- Validação de parâmetros e logging adicionados
 
 ## Estrutura atual
 
@@ -43,21 +44,12 @@ Repositório: https://github.com/valdirmc/Fenics-EDSS (branch `dev`)
 Fenics-EDSS/
 ├── docker/
 │   └── Dockerfile
-├── examples/                  # exemplos fixos
-│   ├── poisson.py
-│   ├── linear_elasticity.py
-│   ├── heat.py
-│   └── hyperelasticity.py
-├── templates/                 # templates parametrizados
-│   ├── linear_elasticity.py
-│   ├── heat.py
-│   └── hyperelasticity.py
-├── params/                    # arquivos JSON de parâmetros
+├── examples/
+├── templates/
+├── params/
 ├── scripts/
-│   ├── run_fenics.sh
-│   └── run_template.sh
 ├── docs/
-├── output/                    # resultados gerados
+├── output/
 ├── docker-compose.yaml
 └── README.md
 ```
@@ -68,7 +60,6 @@ Componentes principais sob **LGPL-3.0-or-later** (DOLFINx, FFCx, UFL) e **MIT** 
 
 ## Próximos passos
 
-- Melhorar validação de parâmetros e logging
 - Documentar templates
 - Preparar integração com FemEDSS-app
 - Deploy em produção na Avell
