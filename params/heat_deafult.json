@@ -1,0 +1,6 @@
+{
+  "nx": 24,
+  "ny": 24,
+  "source": 15.0,
+  "output": "/app/output/heat_param"
+}

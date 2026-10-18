@@ -1,0 +1,11 @@
+{
+  "L": 1.0,
+  "W": 0.1,
+  "nx": 12,
+  "ny": 3,
+  "nz": 3,
+  "E": 8.0e3,
+  "nu": 0.3,
+  "load_z": -0.8,
+  "output": "/app/output/hyper_param"
+}
