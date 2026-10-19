@@ -162,6 +162,24 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0):
             if dof_comp < local.size:
                 local[dof_comp] += cl.value
 
+    # DLOAD do step
+    for dl in step.dloads:
+        for elset_name, elem_ids in model.elsets.items():
+            if elset_name.upper() == dl.elset.upper():
+                for eid in elem_ids:
+                    if eid in model.elements:
+                        for nid in model.elements[eid].nodes:
+                            if nid in model.nodes:
+                                n = model.nodes[nid]
+                                dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
+                                node_idx = np.argmin(dist)
+                                if dist[node_idx] < 1e-6:
+                                    dof_z = node_idx * 3 + 2
+                                    with b.localForm() as local:
+                                        if dof_z < local.size:
+                                            local[dof_z] += dl.value * 0.05
+                break
+
     apply_lifting(b, [a_form], [bcs])
     b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
     set_bc(b, bcs)

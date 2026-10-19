@@ -192,7 +192,13 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
                     elset = parts[0]
                     face = parts[1]
                     value = float(parts[2])
-                    model.dloads.append(SurfaceLoad(elset, face, value))
+                    dl = SurfaceLoad(elset, face, value)
+                    if current_step:
+                        current_step.dloads.append(dl)
+                    else:
+                        if not model.steps:
+                            model.steps.append(Step())
+                        model.steps[0].dloads.append(dl)
                 i += 1
             continue
 
@@ -286,7 +292,7 @@ def summary(model: INPModel) -> str:
         f"NLGEOM: {model.nlgeom}",
     ]
     for i, step in enumerate(model.steps):
-        lines.append(f"  Step {i+1}: {len(step.loads)} cargas, nlgeom={step.nlgeom}")
+        lines.append(f"  Step {i+1}: {len(step.loads)} cargas, {len(step.dloads)} dloads, nlgeom={step.nlgeom}")
     return "\n".join(lines)
 
 
