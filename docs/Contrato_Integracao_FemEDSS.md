@@ -1,131 +1,58 @@
-# Contrato de Integração — FeniCS-EDSS ↔ FemEDSS-app
+# Contrato de Integração FeniCS-EDSS ↔ FemEDSS-app
 
-**Data:** 18/10/2026  
-**Status:** Proposta
-
-## Objetivo
-
-Definir como o FemEDSS-app vai chamar o FeniCS-EDSS como terceiro solver (ao lado de CalculiX e OpenCourant).
+**Versão:** 1.0  
+**Data:** 18/10/2026
 
 ## Visão geral
 
+O FeniCS-EDSS é executado como container Docker. O FemEDSS-app envia um arquivo `.inp` e recebe os resultados em `.pvd`.
+
+## Estrutura de pastas
+
 ```
-FemEDSS-app (FastAPI)
-    │
-    ├── Job queue
-    │
-    └── executar_fenicsx()
-            │
-            └── docker compose / docker run
-                    └── FeniCS-EDSS container
-                            ├── Template (heat, elasticity, hyperelasticity)
-                            ├── Parâmetros JSON
-                            └── Saída: .pvd / .vtu
+Fenics-EDSS/
+├── input/          # Arquivos .inp de entrada
+├── output/         # Resultados .pvd gerados
+├── src/            # Código do solver
+└── docker-compose.yaml
+```
+
+## Chamada
+
+```bash
+# Dentro de Fenics-EDSS/
+docker compose run --rm fenicsx python3 /app/src/run_from_inp.py /app/input/caso.inp [-debug=1]
 ```
 
 ## Entrada
 
-### Opção A — Template + parâmetros (recomendada)
-
-O FemEDSS envia:
-
-- Nome do template (`linear_elasticity`, `heat`, `hyperelasticity`)
-- Arquivo JSON com parâmetros (ou dicionário)
-- Diretório de trabalho (onde a saída será gravada)
-
-Exemplo de chamada:
-
-```python
-executar_fenicsx(
-    template="linear_elasticity",
-    params={"E": 2.0e5, "nu": 0.3, "nx": 16},
-    workdir="/caminho/do/job"
-)
-```
-
-### Opção B — Script livre
-
-O usuário envia um script Python completo. O FeniCS-EDSS apenas executa. Menos controlado, útil para casos avançados.
+- Arquivo `.inp` no formato CalculiX
+- Colocado em `input/`
+- Suporta: estática linear, térmica, hiperelasticidade, múltiplos steps e materiais
 
 ## Saída
 
-| Item | Formato | Observação |
-|------|---------|------------|
-| Resultado principal | `.pvd` + `.vtu` | Compatível com ParaView |
-| Resultado nativo | `.xdmf` + `.h5` | Formato DOLFINx |
-| Status | string | `concluido` ou `erro` |
-| Mensagem | string | Log resumido ou mensagem de erro |
+- Arquivos `{nome}_{N}.pvd` em `output/` (um por step)
+- Arquivos auxiliares `.pvtu`, `.vtu`
 
-## Contrato da função no FemEDSS-app
+## Exemplo
 
-```python
-def executar_fenicsx(
-    template: str,
-    params: dict,
-    workdir: str,
-    timeout: int = 600
-) -> tuple[str, str]:
-    """
-    Executa um template FeniCS-EDSS.
-    
-    Returns:
-        (status, caminho_resultado)
-        status: "concluido" ou "erro"
-        caminho_resultado: caminho do .pvd ou mensagem de erro
-    """
+```bash
+cp meu_caso.inp input/
+docker compose run --rm fenicsx python3 /app/src/run_from_inp.py /app/input/meu_caso.inp
+ls output/meu_caso_*.pvd
 ```
 
-## Implementação sugerida em `app/services/solver.py`
+## Integração com FemEDSS-app
 
-```python
-def executar_fenicsx(template: str, params: dict, workdir: str, timeout: int = 600) -> tuple[str, str]:
-    import json
-    import os
-    import subprocess
-    
-    # Grava parâmetros em arquivo temporário
-    params_file = os.path.join(workdir, "params.json")
-    with open(params_file, "w") as f:
-        json.dump(params, f)
-    
-    # Define saída
-    params["output"] = os.path.join(workdir, template)
-    
-    cmd = [
-        "docker", "compose", "run", "--rm", "-T",
-        "-v", f"{workdir}:/app/output",
-        "-v", f"{params_file}:/app/params.json",
-        "fenicsx",
-        "python3", f"/app/templates/{template}.py", "/app/params.json"
-    ]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=workdir)
-        pvd = os.path.join(workdir, f"{template}.pvd")
-        if result.returncode == 0 and os.path.exists(pvd):
-            return "concluido", pvd
-        return "erro", result.stderr or result.stdout or "Falha na execução"
-    except subprocess.TimeoutExpired:
-        return "erro", "Timeout na execução"
-    except Exception as e:
-        return "erro", str(e)
-```
+O FemEDSS-app deve:
+1. Salvar o `.inp` recebido em `Fenics-EDSS/input/`
+2. Executar o comando Docker
+3. Coletar os `.pvd` de `output/`
+4. Disponibilizar para download ou visualização
 
-## Ajustes necessários no FemEDSS-app
+## Volumes
 
-1. **Modelo `Job`**: adicionar `fenicsx` como valor possível em `solver`
-2. **API**: aceitar `template` e `params` quando `solver == "fenicsx"`
-3. **Interface web**: seletor de template + formulário de parâmetros (ou upload de JSON)
-4. **Serviço**: implementar `executar_fenicsx()` conforme acima
-
-## Volume e permissões
-
-- O diretório do job no host deve ser montado em `/app/output` no container
-- O container precisa de permissão de escrita nesse volume
-- Na Avell, o caminho base será `/home/valdir/000_VALDIR/00_CAE/FemEDSS/`
-
-## Próximos passos
-
-1. Validar este contrato
-2. Implementar `executar_fenicsx()` no FemEDSS-app (Sprint 5)
-3. Testar ponta a ponta com um job real
+O `docker-compose.yaml` já mapeia:
+- `.:/app` (código e pastas input/output)
+- `./output:/app/output`

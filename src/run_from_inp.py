@@ -83,7 +83,12 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0):
     E_func = fem.Function(Q)
     nu_func = fem.Function(Q)
     
-    # Mapeia elementos para células
+    # Inicializa com o primeiro material
+    default_mat = next(iter(model.materials.values()))
+    E_func.x.array[:] = default_mat.E if default_mat.E > 0 else 210000
+    nu_func.x.array[:] = default_mat.nu if default_mat.nu > 0 else 0.3
+    
+    # Sobrescreve com materiais específicos por elset
     elem_to_cell = {el.id: i for i, el in enumerate(model.elements.values())}
     
     for elset_name, elem_ids in model.elsets.items():
