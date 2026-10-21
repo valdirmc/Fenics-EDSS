@@ -6,9 +6,11 @@ services:
     image: edss/fenicsx:dev
     container_name: fenicsx-edss
     working_dir: /app
+    command: ["sleep", "infinity"]
     volumes:
-      - /home/valdir/000_VALDIR/00_CAE/Fenics-EDSS:/app
-      - /home/valdir/000_VALDIR/00_CAE/Fenics-EDSS/output:/app/output
+      - .:/app
+      - ./output:/app/output
     environment:
       - PYTHONUNBUFFERED=1
       - PYVISTA_OFF_SCREEN=true
+   
