@@ -37,3 +37,8 @@ docker compose build
 # Executar exemplo Poisson
 docker compose run --rm fenicsx python3 /app/examples/poisson.py
 ```
+
+## Documentação
+
+- Overview técnico (fluxo, maturidade, riscos): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Índice: [docs/README.md](docs/README.md)
