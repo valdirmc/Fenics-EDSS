@@ -18,7 +18,8 @@ Fenics-EDSS/
 │   └── run_fenics.sh
 ├── docs/
 ├── tests/
-├── docker-compose.yaml
+├── docker-compose-general.yaml  # versionado
+├── docker-compose.yaml         # local (gitignored)
 ├── README.md
 └── .gitignore
 ```
@@ -28,6 +29,17 @@ Fenics-EDSS/
 - **Nitro** (dev/test): `/run/media/valdir/MAIN/000_VALDIR/GIT_PJR/FemEDSS/Fenics-EDSS`
 - **Avell** (prod): `/home/valdir/000_VALDIR/00_CAE/FemEDSS/Fenics-EDSS`
 
+
+## Docker Compose
+
+- Shared: [`docker-compose-general.yaml`](docker-compose-general.yaml)
+- Por máquina: `docker-compose.yaml` (gitignored)
+- Detalhes: [docs/DOCKER_COMPOSE.md](docs/DOCKER_COMPOSE.md)
+
+```bash
+docker compose -f docker-compose-general.yaml -f docker-compose.yaml build
+docker compose -f docker-compose-general.yaml -f docker-compose.yaml run --rm fenicsx python3 /app/examples/poisson.py
+```
 ## Uso rápido
 
 ```bash

@@ -10,6 +10,7 @@ Projeto para integrar o FEniCSx como solver FEM no ecossistema EDSS.
 | Documento | Conteúdo |
 |-----------|----------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Overview técnico: fluxo `.inp`→DOLFINx→`.pvd`, EDSS vs terceiros, maturidade, bugs/riscos demo |
+| [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | Compose general vs por máquina |
 | [Memoria_Projeto_Fenics-EDSS.md](Memoria_Projeto_Fenics-EDSS.md) | Memória cronológica / sprints |
 | [Contrato_Integracao_FemEDSS.md](Contrato_Integracao_FemEDSS.md) | Contrato de integração com FemEDSS-app |
 | [Integracao_FemEDSS.md](Integracao_FemEDSS.md) | Notas de volume/Docker aninhado |

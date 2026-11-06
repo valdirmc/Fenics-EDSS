@@ -29,3 +29,6 @@ Thumbs.db
 # Logs
 *.log
 input/*.inp
+
+# Por máquina (Nitro/Avell); use docker-compose-general.yaml no git
+docker-compose.yaml
