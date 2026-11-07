@@ -29,7 +29,10 @@
 | Card | Suporte |
 |------|---------|
 | `*STATIC` | Sim |
-| `*NLGEOM` | Parser ok |
+| `*NLGEOM` | Sim |
+| `*HEAT TRANSFER` | Sim |
+| `*HYPERELASTIC` (Neo-Hooke: mu, lambda) | Sim |
+| `*CONDUCTIVITY` | Sim |
 
 ## Status da implementação (18/10/2026)
 
@@ -47,14 +50,14 @@
 - `examples/beam_nset.inp` — estática, BCs por nset
 - `examples/beam_multimat.inp` — 2 materiais (parser)
 - `examples/beam_dload.inp` — pressão
-- `examples/beam_thermal.inp` — condução térmica
+- `examples/beam_thermal.inp` — condução térmica (`*HEAT TRANSFER`)
+- `examples/beam_hyper.inp` — hiperelasticidade (`*HYPERELASTIC`)
 
 ## Uso
 ```bash
-# Silencioso
-docker compose run --rm fenicsx python3 /app/src/run_from_inp.py /app/examples/beam_thermal.inp
+# Saída no diretório do job
+python3 /app/src/run_from_inp.py /job/input/beam_thermal.inp --output-dir /job/output
 
-# Com debug
-docker compose run --rm fenicsx python3 /app/src/run_from_inp.py /app/examples/beam_thermal.inp -debug=1
+# Compatível com a chamada antiga (grava em /app/output)
+python3 /app/src/run_from_inp.py /app/examples/beam_thermal.inp -debug=1
 ```
-| Hiperelasticidade | Pendente | Pendente |

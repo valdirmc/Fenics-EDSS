@@ -6,7 +6,6 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     image: edss/fenicsx:dev
-    container_name: fenicsx-edss
     working_dir: /app
     command: ["sleep", "infinity"]
     volumes:

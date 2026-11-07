@@ -3,6 +3,7 @@
 Executa condução térmica a partir de um arquivo .inp.
 """
 
+import os
 import sys
 import numpy as np
 from mpi4py import MPI
@@ -13,6 +14,7 @@ import basix.ufl
 
 sys.path.insert(0, "/app/src")
 from inp_parser import parse_inp, summary
+from job_io import write_vtk_function
 
 
 def run_thermal(inp_path: str, output_base: str = "/app/output/thermal", debug: int = 0):
@@ -76,21 +78,14 @@ def run_thermal(inp_path: str, output_base: str = "/app/output/thermal", debug: 
     uh = problem.solve()
     uh.name = "temperature"
 
-    # Saída
-    import os
-    os.makedirs("/app/output", exist_ok=True)
+    # Saída somente no diretório de output_base (não em /app/output global).
+    out_dir = os.path.dirname(os.path.abspath(output_base))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with io.XDMFFile(domain.comm, f"{output_base}.xdmf", "w") as xdmf:
         xdmf.write_mesh(domain)
         xdmf.write_function(uh)
-    try:
-        from dolfinx.io import VTKFile
-        with VTKFile(domain.comm, f"{output_base}.pvd", "w") as vtk:
-            vtk.write_function(uh)
-        if debug:
-            print(f"PVD gerado: {output_base}.pvd")
-    except Exception as e:
-        if debug:
-            print(f"Aviso: {e}")
+    write_vtk_function(domain.comm, uh, output_base, debug=debug)
 
     tmax = uh.x.array.max()
     tmin = uh.x.array.min()
