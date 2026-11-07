@@ -8,6 +8,8 @@ import os
 import sys
 import pytest
 
+pytest.importorskip("dolfinx")
+
 # Adiciona o diretório raiz ao path
 sys.path.insert(0, "/app")
 

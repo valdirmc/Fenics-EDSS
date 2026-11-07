@@ -4,7 +4,6 @@ Executa análise hiperelástica (Neo-Hooke) a partir de um arquivo .inp.
 """
 
 import sys
-import os
 import numpy as np
 from mpi4py import MPI
 from dolfinx import mesh, fem, io, default_scalar_type, log
@@ -15,7 +14,7 @@ import ufl
 import basix.ufl
 
 sys.path.insert(0, "/app/src")
-from inp_parser import parse_inp, summary
+from job_io import write_vtk_function
 from run_from_inp import build_mesh_from_inp
 
 
@@ -28,15 +27,18 @@ def run_hyperelastic(model, step, output_base: str, debug: int = 0):
     
     V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
 
-    # Parâmetros Neo-Hooke (do material Borracha ou padrão)
-    mu = default_scalar_type(1.0)
-    lmbda = default_scalar_type(0.1)
+    # Neo-Hooke: usa mu e lambda lidos de *HYPERELASTIC; senão o padrão anterior.
+    mu_val = 1.0
+    lmbda_val = 0.1
     for mat in model.materials.values():
-        if "BORRACHA" in mat.name.upper() or mat.E == 0:
-            # Usa valores do HYPERELASTIC se disponíveis
-            mu = default_scalar_type(1.0)
-            lmbda = default_scalar_type(0.1)
+        if mat.hyperelastic or "BORRACHA" in mat.name.upper():
+            if mat.mu is not None:
+                mu_val = mat.mu
+            if mat.lmbda is not None:
+                lmbda_val = mat.lmbda
             break
+    mu = default_scalar_type(mu_val)
+    lmbda = default_scalar_type(lmbda_val)
 
     if debug:
         print(f"Neo-Hooke: mu={float(mu)}, lambda={float(lmbda)}")
@@ -95,17 +97,7 @@ def run_hyperelastic(model, step, output_base: str, debug: int = 0):
     if debug:
         print("Newton concluído")
 
-    # Saída
-    os.makedirs(os.path.dirname(output_base) or ".", exist_ok=True)
-    try:
-        from dolfinx.io import VTKFile
-        with VTKFile(domain.comm, f"{output_base}.pvd", "w") as vtk:
-            vtk.write_function(u)
-        if debug:
-            print(f"PVD: {output_base}.pvd")
-    except Exception as e:
-        if debug:
-            print(f"Aviso: {e}")
+    write_vtk_function(domain.comm, u, output_base, debug=debug)
 
     norma = np.linalg.norm(u.x.array)
     if debug:
