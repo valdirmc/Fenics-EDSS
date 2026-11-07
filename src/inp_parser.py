@@ -2,7 +2,8 @@
 """
 Parser mínimo de arquivo .inp (CalculiX/Abaqus) para FeniCS-EDSS.
 Suporta: *NODE, *ELEMENT (C3D8, C3D4), *MATERIAL, *ELASTIC,
-         *SOLID SECTION, *BOUNDARY, *CLOAD, *STATIC
+         *HYPERELASTIC, *CONDUCTIVITY, *SOLID SECTION, *BOUNDARY,
+         *CLOAD, *DLOAD, *STATIC, *HEAT TRANSFER, *NLGEOM
 """
 
 import re
@@ -31,6 +32,10 @@ class Material:
     E: float = 0.0
     nu: float = 0.0
     k: float = 0.0  # condutividade térmica
+    # Neo-Hooke lido de *HYPERELASTIC (mu, lambda). None = não informado.
+    mu: Optional[float] = None
+    lmbda: Optional[float] = None
+    hyperelastic: bool = False
 
 
 @dataclass
@@ -74,6 +79,7 @@ class INPModel:
     steps: List[Step] = field(default_factory=list)
     analysis_type: str = "static"
     nlgeom: bool = False
+    hyperelastic: bool = False
 
 
 def parse_inp(path: str, debug: int = 0) -> INPModel:
@@ -133,6 +139,22 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
                     model.materials[current_material].E = float(parts[0])
                     model.materials[current_material].nu = float(parts[1])
             i += 1
+            continue
+
+        if upper.startswith("*HYPERELASTIC") and current_material:
+            mat = model.materials[current_material]
+            mat.hyperelastic = True
+            model.hyperelastic = True
+            i += 1
+            if i < len(lines):
+                data = lines[i].strip()
+                if data and not data.startswith("*"):
+                    parts = [p.strip() for p in data.split(",") if p.strip()]
+                    if parts:
+                        mat.mu = float(parts[0])
+                    if len(parts) >= 2:
+                        mat.lmbda = float(parts[1])
+                    i += 1
             continue
 
         if upper.startswith("*CONDUCTIVITY") and current_material:
@@ -253,6 +275,13 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
             i += 1
             continue
 
+        if upper.startswith("*HEAT TRANSFER"):
+            model.analysis_type = "heat"
+            if current_step:
+                current_step.analysis_type = "heat"
+            i += 1
+            continue
+
         if upper.startswith("*CLOAD"):
             i += 1
             while i < len(lines) and not lines[i].strip().startswith("*"):
@@ -277,6 +306,34 @@ def parse_inp(path: str, debug: int = 0) -> INPModel:
     return model
 
 
+def select_analysis(model: INPModel, step: Step) -> str:
+    """Escolhe o solver do step: ``heat``, ``hyper`` ou ``linear``."""
+    if step.analysis_type == "heat" or model.analysis_type == "heat":
+        return "heat"
+    if step.nlgeom or model.nlgeom or model.hyperelastic:
+        return "hyper"
+    return "linear"
+
+
+def get_material_for_element(model: INPModel, elem_id: int) -> Optional[Material]:
+    """Retorna o material do elemento via elset/solid section.
+
+    Se o elemento não estiver em nenhum elset com material, devolve o
+    primeiro material do modelo (ou ``None`` se não houver materiais).
+    """
+    for elset_name, elem_ids in model.elsets.items():
+        if elem_id in elem_ids:
+            mat_name = model.solid_sections.get(elset_name.upper())
+            if not mat_name:
+                continue
+            for name, mat in model.materials.items():
+                if name.upper() == mat_name.upper():
+                    return mat
+    if model.materials:
+        return next(iter(model.materials.values()))
+    return None
+
+
 def summary(model: INPModel) -> str:
     """Retorna um resumo do modelo lido."""
     lines = [
@@ -290,6 +347,7 @@ def summary(model: INPModel) -> str:
         f"Steps: {len(model.steps)}",
         f"Tipo de análise: {model.analysis_type}",
         f"NLGEOM: {model.nlgeom}",
+        f"Hiperelástico: {model.hyperelastic}",
     ]
     for i, step in enumerate(model.steps):
         lines.append(f"  Step {i+1}: {len(step.loads)} cargas, {len(step.dloads)} dloads, nlgeom={step.nlgeom}")

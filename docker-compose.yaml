@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     image: edss/fenicsx:dev
-    container_name: fenicsx-edss
+    # Sem container_name: vários jobs podem rodar ao mesmo tempo.
     working_dir: /app
     command: ["sleep", "infinity"]
     volumes:
