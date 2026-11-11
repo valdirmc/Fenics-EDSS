@@ -251,3 +251,13 @@ def test_fc_aceita_boundary_4_colunas_valor(tmp_path):
     model = parse_inp(_w(tmp_path, "bc4.inp", text), profile="fc")
     vals = {(bc.node, bc.dof, bc.value) for bc in model.boundary}
     assert (4, 3, -0.001) in vals
+
+
+def test_t0_hidrostatico_von_mises():
+    """C6/T0 proposto: tensao hidostatica deve ter sigma_vm ~ 0 (sem cancelamento)."""
+    for pval in (100.0, -100.0, 1.0):
+        sigma = np.eye(3)[None, :, :] * pval
+        pr, vm = principals_algebraic(sigma)
+        assert pr[0, 0] == pytest.approx(pval)
+        assert pr[0, 2] == pytest.approx(pval)
+        assert vm[0] <= 1e-12 * abs(pval)

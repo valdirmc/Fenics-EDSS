@@ -85,3 +85,15 @@ Flexao/convergencia formal ficou para o proximo lote (o axial+compressao fechou 
 ### Caso auxiliar E=71700 (decisao Valdir, 11/11/2026)
 
 Autorizado usar o INP original de Luiz (E=71700 MPa, cargas simplificadas) **apenas como teste auxiliar**, preservando o arquivo e o hash, com saidas rotuladas AUXILIAR/E71700/cargas simplificadas. O caso definitivo permanece E=70000 e o perfil combinado. Este lote **nao rodou** o modelo de 125395 nos / 476960 C3D4: o solver FC ainda usa LU direto, e nao ha medicao que mostre caber com margem no teto isolado de 2 GB sem risco a outros processos da Nitro. Comparacoes CCX so com campos/localizacao compativeis e tolerancias fornecidas; nenhuma tolerancia de aceite foi inventada.
+
+## Lote 3 (11/11/2026) — B1 e recursos
+
+Benchmark B1 (proposta de Luiz): prisma 200×20×20 mm, flexão pura Saint-Venant, E=70000, ν=0,33, M=1,0e5 N·mm, σ_máx=75 MPa. Malha estruturada, 6 tets/hex (Freudenthal, diagonal n000–n111), 2/4/8/16 elementos na espessura com nx=10 n (elementos aproximadamente cúbicos). Apoios 3-2-1 em x=0, sem engaste. Cargas consistentes T3 nas faces x=0 e x=L.
+
+Nota: Luiz citou κ=1,07e-6 /mm; as fórmulas κ=M/(E I) com σ_máx=75 MPa dão **κ=1,0714e-4 /mm**. O código usa as fórmulas.
+
+C3D4 é rígido em flexão (esperado). Flecha e rotação menores que a exata em todos os níveis; energia ½f·u_h sobe monotonicamente em direção à exata (0,49 → 0,78 → 0,93 → 0,98). Tensões parasitárias (σyy, σzz, cisalhamentos) presentes e decaem com o refinamento.
+
+Critérios C7/C8/C2/C3 são **PROPOSTAS**, não congelados. **Gate V não está aprovado.** Contra as propostas, na malha de 16 na espessura: |erro uy| e |erro rotação| ≤ 2 %; σxx médio na esfera (baricentros) ≤ 5 %; ordens L2(u) em 4→8 e 8→16 dentro de [1,6; 2,4]; ordens L2(σ) dentro de [0,7; 1,3]. A esfera usa tets com baricentro no raio de 2 mm (o volume do conjunto muda com h; não é recorte geométrico exato).
+
+Recursos (LU direto, container isolado, processo fresco): ver nota de execução do lote 3. A extrapolação incremental (N^1,35) para ~376k DOFs cai na casa de 10 GiB sem margem, e 20–30 GiB com fator 2–3. Com ~11 GiB disponíveis na Nitro e serviços no ar, o caso auxiliar da roda **não foi executado**.

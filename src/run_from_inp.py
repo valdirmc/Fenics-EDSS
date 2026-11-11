@@ -397,6 +397,29 @@ def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model,
         "My": rx["moment_R_origin"]["My"] + mom_f["My"],
         "Mz": rx["moment_R_origin"]["Mz"] + mom_f["Mz"],
     }
+    force_char = 0.0
+    moment_char = 0.0
+    for cl in (model.steps[0].loads if model.steps else []):
+        if cl.node not in model.nodes:
+            continue
+        n = model.nodes[cl.node]
+        fx = cl.value if cl.dof == 1 else 0.0
+        fy = cl.value if cl.dof == 2 else 0.0
+        fz = cl.value if cl.dof == 3 else 0.0
+        force_char += abs(fx) + abs(fy) + abs(fz)
+        moment_char += abs(n.y * fz - n.z * fy) + abs(n.z * fx - n.x * fz) + abs(n.x * fy - n.y * fx)
+    for ent in rx.get("entries") or []:
+        val = float(ent.get("R", 0.0))
+        comp = int(ent.get("component", 0))
+        nid = int(ent.get("inp_node", 0))
+        if nid not in model.nodes:
+            continue
+        n = model.nodes[nid]
+        fx = val if comp == 0 else 0.0
+        fy = val if comp == 1 else 0.0
+        fz = val if comp == 2 else 0.0
+        force_char += abs(val)
+        moment_char += abs(n.y * fz - n.z * fy) + abs(n.z * fx - n.x * fz) + abs(n.x * fy - n.y * fx)
 
     react_path = output_base + "_reactions.json"
     payload = {
@@ -408,6 +431,8 @@ def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model,
         "moment_R_plus_F_origin": mom_sum,
         "n_constrained_dofs": rx["n_constrained_dofs"],
         "residual_free_dofs_max_abs": rx["residual_free_dofs_max_abs"],
+        "force_char": force_char,
+        "moment_char": moment_char,
         "entries": rx["entries"],
         "note": (
             "RF = (K_full u - f_ext) apenas em DOFs prescritos. "
@@ -448,6 +473,8 @@ def _check_fc_force_balance(extra, rel=1e-5, abs_tol=1e-6):
     """Recusa sucesso se R+F (e momentos) nao fecharem no residual do proprio solver.
 
     Tolerancia numerica de consistencia (LU / residual), nao aceite Luiz/GateV.
+    Forca/momento resultantes nulos (binario puro) usam a escala caracteristica
+    das parcelas (|F_i| e |r x F_i| + |r x R_i|), nao o total que se cancela.
     """
     rx = extra.get("reactions") or {}
     sum_rf = rx.get("sum_R_plus_F") or {}
@@ -455,9 +482,16 @@ def _check_fc_force_balance(extra, rel=1e-5, abs_tol=1e-6):
     applied = rx.get("applied_totals") or extra.get("applied") or {}
     totals = rx.get("totals") or {}
     scale_f = max(
-        [abs_tol, abs(float(applied.get("Fx", 0.0))), abs(float(applied.get("Fy", 0.0))),
-         abs(float(applied.get("Fz", 0.0))), abs(float(totals.get("RFx", 0.0))),
-         abs(float(totals.get("RFy", 0.0))), abs(float(totals.get("RFz", 0.0)))]
+        [
+            abs_tol,
+            abs(float(applied.get("Fx", 0.0))),
+            abs(float(applied.get("Fy", 0.0))),
+            abs(float(applied.get("Fz", 0.0))),
+            abs(float(totals.get("RFx", 0.0))),
+            abs(float(totals.get("RFy", 0.0))),
+            abs(float(totals.get("RFz", 0.0))),
+            abs(float(rx.get("force_char", 0.0))),
+        ]
     )
     for key in ("Fx", "Fy", "Fz"):
         val = abs(float(sum_rf.get(key, 0.0)))
@@ -466,14 +500,25 @@ def _check_fc_force_balance(extra, rel=1e-5, abs_tol=1e-6):
                 "Equilibrio de forca nao fechou no perfil FC ({0}={1}, escala={2}). "
                 "Nao e sucesso.".format(key, sum_rf.get(key), scale_f)
             )
-    # momento: escala caracteristica ~ forca * 1 (coords em mm da malha local)
-    scale_m = scale_f
+    scale_m = max(
+        [
+            abs_tol,
+            scale_f,  # fallback se nao houver binario
+            abs(float(rx.get("moment_char", 0.0))),
+            abs(float((rx.get("moment_F_origin") or {}).get("Mx", 0.0))),
+            abs(float((rx.get("moment_F_origin") or {}).get("My", 0.0))),
+            abs(float((rx.get("moment_F_origin") or {}).get("Mz", 0.0))),
+            abs(float((rx.get("moment_R_origin") or {}).get("Mx", 0.0))),
+            abs(float((rx.get("moment_R_origin") or {}).get("My", 0.0))),
+            abs(float((rx.get("moment_R_origin") or {}).get("Mz", 0.0))),
+        ]
+    )
     for key in ("Mx", "My", "Mz"):
         val = abs(float(mom.get(key, 0.0)))
-        if val > max(abs_tol, rel * scale_m * 10.0):
+        if val > max(abs_tol, rel * scale_m):
             raise RuntimeError(
-                "Equilibrio de momento nao fechou no perfil FC ({0}={1}). "
-                "Nao e sucesso.".format(key, mom.get(key))
+                "Equilibrio de momento nao fechou no perfil FC ({0}={1}, escala={2}). "
+                "Nao e sucesso.".format(key, mom.get(key), scale_m)
             )
 
 
