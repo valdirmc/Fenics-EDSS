@@ -97,3 +97,11 @@ C3D4 é rígido em flexão (esperado). Flecha e rotação menores que a exata em
 Critérios C7/C8/C2/C3 são **PROPOSTAS**, não congelados. **Gate V não está aprovado.** Contra as propostas, na malha de 16 na espessura: |erro uy| e |erro rotação| ≤ 2 %; σxx médio na esfera (baricentros) ≤ 5 %; ordens L2(u) em 4→8 e 8→16 dentro de [1,6; 2,4]; ordens L2(σ) dentro de [0,7; 1,3]. A esfera usa tets com baricentro no raio de 2 mm (o volume do conjunto muda com h; não é recorte geométrico exato).
 
 Recursos (LU direto, container isolado, processo fresco): ver nota de execução do lote 3. A extrapolação incremental (N^1,35) para ~376k DOFs cai na casa de 10 GiB sem margem, e 20–30 GiB com fator 2–3. Com ~11 GiB disponíveis na Nitro e serviços no ar, o caso auxiliar da roda **não foi executado**.
+
+### Caso auxiliar E=71700 — aborto 11/11 18:56 America/Sao_Paulo (opcao B)
+
+Valdir autorizou (18:56 America/Sao_Paulo, retransmitido por Alex) parar temporariamente só `mngsys-app-1` e `ubuntu-calculix` para liberar RAM, religando depois, e rodar o INP original (E=71700, cargas simplificadas Face119/121) como teste **AUXILIAR**, com critério MemAvailable ≥ ~20 GiB após a parada (margem 2× sobre a previsão LU de ~10,4 GiB).
+
+Inventário e checagem de atividade (18:57–18:59 America/Sao_Paulo): sem requests mngsys nos últimos 15 min; Guto-MngSys.log parado em 10/11 18:46; nenhum `ccx`; Postgres do mngsys é o servidor 18 do host em :5432 (não o `femedss-app-db-1` em :5434) e não foi parado. Os dois containers autorizados somavam **108 MiB** (94 + 14). MemAvailable = **10,40 GiB**; após uma parada a estimativa seria ≈ **10,50 GiB**, ainda ~9,5 GiB abaixo do critério.
+
+**Decisão:** abortar **sem** parar os containers e **sem** executar o solver (evitar interrupção inútil). Hash do INP conferido somente leitura: `9380e87b6073d3180b85591bcd677cd5be7d15f52a870fcc2fba6a2c3fce7e92`. Sem RF, equilíbrio, U, tensões nem comparação CCX. Gate V não aprovado. Nota: `nota-execucao-FC-auxiliar-2026-11-11.md`.
