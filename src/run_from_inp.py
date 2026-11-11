@@ -4,8 +4,10 @@ Executa análise a partir de um arquivo .inp.
 Detecta o tipo (estática ou térmica) e chama a função apropriada.
 """
 
+import json
 import sys
 import os
+import uuid
 import numpy as np
 from mpi4py import MPI
 from dolfinx import mesh, fem, default_scalar_type
@@ -23,6 +25,7 @@ from job_io import (
     resolve_output_dir,
     step_output_base,
     write_run_manifest,
+    write_run_status,
     write_vtk_function,
     verify_run_artifacts,
 )
@@ -30,7 +33,18 @@ from fc_profile import (
     FCProfileError,
     check_honored_outputs,
     normalize_units,
+    parse_report_payload,
     required_output_fields,
+    PARSE_NOT_SOLVED_BANNER,
+)
+from fc_assembly import (
+    apply_cloads,
+    check_solution_finite,
+    collect_constrained_dofs,
+    inp_element_to_cell,
+    inp_node_to_geom,
+    require_serial_fc,
+    residual_on_constrained,
 )
 
 
@@ -78,19 +92,24 @@ def build_mesh_from_inp(model, debug=0):
 def run_linear_static_step(model, step, output_base: str, debug: int = 0, profile: str = None):
     """Executa um step de estatica linear com multiplos materiais."""
     profile_fc = (profile or "").strip().lower() == "fc"
+    require_serial_fc(MPI.COMM_WORLD, profile_fc)
     domain, node_map = build_mesh_from_inp(model, debug=debug)
-    
+
     domain.topology.create_connectivity(0, domain.topology.dim)
     domain.topology.create_connectivity(domain.topology.dim, 0)
-    
+
+    nid_to_geom = inp_node_to_geom(domain, model)
+    eid_to_cell = inp_element_to_cell(domain, model, nid_to_geom)
+    if debug:
+        print(f"Mapa INP->geom: {len(nid_to_geom)} nos; INP->celula: {len(eid_to_cell)} elems")
+
     V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
 
-    # Materiais por célula (DG-0)
+    # Materiais por célula (DG-0). Indices de celula via mapa INP, nao enumeracao crua.
     Q = fem.functionspace(domain, ("DG", 0))
     E_func = fem.Function(Q)
     nu_func = fem.Function(Q)
-    
-    # Inicializa com o primeiro material
+
     if not model.materials:
         raise ValueError("Nenhum material *ELASTIC encontrado no .inp")
     default_mat = next(iter(model.materials.values()))
@@ -98,58 +117,37 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
         raise FCProfileError("Perfil FC exige *ELASTIC com E e nu informados (sem default silencioso).")
     E_func.x.array[:] = default_mat.E if default_mat.E > 0 else 210000
     nu_func.x.array[:] = default_mat.nu if default_mat.nu > 0 else 0.3
-    
-    # Sobrescreve com materiais específicos por elset
-    elem_to_cell = {el.id: i for i, el in enumerate(model.elements.values())}
-    
-    for elset_name, elem_ids in model.elsets.items():
-        mat = get_material_for_element(model, elem_ids[0] if elem_ids else 0)
+
+    for eid in model.elements:
+        mat = get_material_for_element(model, eid)
         if mat is None:
             continue
-        for eid in elem_ids:
-            if eid in elem_to_cell:
-                cell_idx = elem_to_cell[eid]
-                if cell_idx < len(E_func.x.array):
-                    if profile_fc and mat.E <= 0:
-                        raise FCProfileError("Material sem E no perfil FC.")
-                    E_func.x.array[cell_idx] = mat.E if mat.E > 0 else 210000
-                    nu_func.x.array[cell_idx] = mat.nu if mat.nu > 0 else 0.3
-    
+        cell_idx = eid_to_cell[eid]
+        if cell_idx < len(E_func.x.array):
+            if profile_fc and mat.E <= 0:
+                raise FCProfileError("Material sem E no perfil FC.")
+            E_func.x.array[cell_idx] = mat.E if mat.E > 0 else 210000
+            nu_func.x.array[cell_idx] = mat.nu if mat.nu > 0 else 0.3
+
     E_func.x.scatter_forward()
     nu_func.x.scatter_forward()
-    
+
     if debug:
         print(f"Materiais aplicados: E min={E_func.x.array.min():.0f}, max={E_func.x.array.max():.0f}")
 
-    # Propriedades como funções
     E = E_func
     nu = nu_func
     mu = E / (2.0 * (1.0 + nu))
     lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
 
-    # BCs por componente, honrando o valor prescrito (nao zerar tudo).
-    bcs = []
-    for bc in model.boundary:
-        if bc.node not in model.nodes:
-            continue
-        n = model.nodes[bc.node]
-        component = bc.dof - 1
-        if component < 0 or component >= domain.geometry.dim:
-            continue
+    bcs, constrained_rows = collect_constrained_dofs(V, model, profile_fc)
+    if profile_fc and not constrained_rows:
+        raise RuntimeError(
+            "Perfil FC recusa sistema sem DOFs prescritos (*BOUNDARY). "
+            "Ha modos de corpo rigido; uma fatoracao LU que nao acusa "
+            "singularidade nao conta como sucesso."
+        )
 
-        def marker(x, nx=n.x, ny=n.y, nz=n.z):
-            return (np.isclose(x[0], nx, atol=1e-6) &
-                    np.isclose(x[1], ny, atol=1e-6) &
-                    np.isclose(x[2], nz, atol=1e-6))
-
-        Vcol, _map = V.sub(component).collapse()
-        dofs = fem.locate_dofs_geometrical((V.sub(component), Vcol), marker)
-        if len(dofs) > 0:
-            u_comp = fem.Function(Vcol)
-            u_comp.x.array[:] = bc.value
-            bcs.append(fem.dirichletbc(u_comp, dofs, V.sub(component)))
-
-    # Formulação
     def epsilon(u):
         return ufl.sym(ufl.grad(u))
 
@@ -163,42 +161,37 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
 
     a_form = fem.form(a)
     L_compiled = fem.form(L_form)
+
+    # Matriz completa (sem BC) para residual/RF; matriz com BC so no solve.
+    A_full = assemble_matrix(a_form)
+    A_full.assemble()
     A = assemble_matrix(a_form, bcs=bcs)
     A.assemble()
     b = assemble_vector(L_compiled)
 
-    # Cargas do step
-    for cl in step.loads:
-        if cl.node not in model.nodes:
-            continue
-        n = model.nodes[cl.node]
-        dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
-        node_idx = np.argmin(dist)
-        if dist[node_idx] > 1e-6:
-            continue
-        comp = cl.dof - 1
-        dof_comp = node_idx * 3 + comp
-        with b.localForm() as local:
-            if dof_comp < local.size:
-                local[dof_comp] += cl.value
+    applied = apply_cloads(V, b, model, step, profile_fc)
 
-    # DLOAD do step
-    for dl in step.dloads:
-        for elset_name, elem_ids in model.elsets.items():
-            if elset_name.upper() == dl.elset.upper():
-                for eid in elem_ids:
-                    if eid in model.elements:
-                        for nid in model.elements[eid].nodes:
-                            if nid in model.nodes:
-                                n = model.nodes[nid]
-                                dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
-                                node_idx = np.argmin(dist)
-                                if dist[node_idx] < 1e-6:
-                                    dof_z = node_idx * 3 + 2
-                                    with b.localForm() as local:
-                                        if dof_z < local.size:
-                                            local[dof_z] += dl.value * 0.05
-                break
+    if step.dloads:
+        if profile_fc:
+            raise FCProfileError("Perfil FC rejeita *DLOAD (sem heuristicas de pressao).")
+        # Recorte antigo (nao FC): contribuicao nodal aproximada; nao usar como pressao real.
+        coords = domain.geometry.x
+        for dl in step.dloads:
+            for elset_name, elem_ids in model.elsets.items():
+                if elset_name.upper() == dl.elset.upper():
+                    for eid in elem_ids:
+                        if eid in model.elements:
+                            for nid in model.elements[eid].nodes:
+                                if nid in model.nodes:
+                                    n = model.nodes[nid]
+                                    dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
+                                    node_idx = np.argmin(dist)
+                                    if dist[node_idx] < 1e-6:
+                                        dof_z = node_idx * 3 + 2
+                                        with b.localForm() as local:
+                                            if dof_z < local.size:
+                                                local[dof_z] += dl.value * 0.05
+                    break
 
     f_ext = b.copy()
 
@@ -210,28 +203,42 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
     solver.setOperators(A)
     solver.setType("preonly")
     solver.getPC().setType("lu")
+    try:
+        solver.setErrorIfNotConverged(True)
+    except Exception:
+        pass
     uh = fem.Function(V)
-    solver.solve(b, uh.x.petsc_vec)
+    try:
+        solver.solve(b, uh.x.petsc_vec)
+    except Exception as exc:
+        raise RuntimeError(
+            "Solver PETSc falhou (possivel matriz singular ou nao convergencia): {0}".format(exc)
+        ) from exc
     uh.x.scatter_forward()
+    check_solution_finite(uh, solver)
     uh.name = "displacement"
 
     write_vtk_function(domain.comm, uh, output_base, debug=debug)
     honored = ["U"]
     artifacts = [{"path": output_base + ".pvd", "field": "U", "location": "nodal-CG1"}]
-    extra = {"honored": honored, "artifacts": artifacts, "reactions": None}
+    extra = {"honored": honored, "artifacts": artifacts, "reactions": None, "applied": applied}
 
     if profile_fc:
         extra = _write_fc_linear_fields(
-            domain, uh, v, sigma, epsilon, f_ext, a_form, model, output_base, debug
+            domain, uh, v, sigma, epsilon, f_ext, a_form, model, output_base, debug,
+            constrained_rows=constrained_rows, applied=applied,
         )
+        _check_fc_force_balance(extra)
 
     norma = np.linalg.norm(uh.x.array)
     if debug:
         print(f"Norma: {norma:.6e}")
     return uh, extra
 
+
 def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0,
-                 profile: str = None, units: str = None):
+                 profile: str = None, units: str = None, parse_only: bool = False,
+                 run_id: str = None):
     """Executa cada step e grava a saida somente em output_dir."""
     if not os.path.exists(inp_path):
         print(f"ERRO: arquivo nao encontrado: {inp_path}")
@@ -245,10 +252,38 @@ def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0,
         units_norm = normalize_units(units)
 
     output_dir = prepare_output_dir(resolve_output_dir(output_dir))
+    run_id = run_id or str(uuid.uuid4())
+    if profile_fc:
+        write_run_status(output_dir, {
+            "status": "started",
+            "run_id": run_id,
+            "solver_run": not parse_only,
+            "note": "run em andamento; manifesto antigo neste diretorio nao e sucesso desta run",
+        })
+
     model = parse_inp(inp_path, debug=debug, profile=profile)
     if debug:
         print(summary(model))
         print("---")
+
+    if parse_only:
+        payload = parse_report_payload(model, os.path.abspath(inp_path))
+        payload["run_id"] = run_id
+        payload["units"] = units_norm
+        report_path = os.path.join(output_dir, "parse_report.json")
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        print(PARSE_NOT_SOLVED_BANNER)
+        print("Parse report:", report_path)
+        if profile_fc:
+            write_run_status(output_dir, {
+                "status": "parse_ok_not_solved",
+                "run_id": run_id,
+                "solver_run": False,
+                "parse_report": report_path,
+            })
+        return {"parse_only": True, "model": model, "report": payload}
 
     if not model.steps:
         model.steps.append(Step())
@@ -281,14 +316,13 @@ def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0,
         results.append((result, extra))
 
     if profile_fc:
-        _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug)
+        _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug, run_id=run_id)
 
     return results
 
 
-
-
-def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model, output_base, debug):
+def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model, output_base, debug,
+                            constrained_rows=None, applied=None):
     """Grava U, S, principais, von Mises, E e RF do perfil FC. Falha se VTK falhar."""
     import json
     import os
@@ -308,6 +342,7 @@ def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model,
     cauchy_f = interpolate_cell_tensor(domain, cauchy_ufl, "cauchy_stress")
     strain_f = interpolate_cell_tensor(domain, strain_ufl, "strain")
     sigma_cells = tensor_array_from_function(cauchy_f)
+    # Simetria residual ja e aplicada em principals_algebraic.
     principals, vm = principals_algebraic(sigma_cells)
     prin_f = interpolate_cell_vector(domain, principals, "principal_stress")
     vm_f = interpolate_cell_scalar(domain, vm, "von_mises")
@@ -318,70 +353,128 @@ def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model,
         output_base + "_cell",
     )
 
-    # Reacoes: R = K u - f_ext nos dofs (nos presos devem equilibrar as cargas).
+    # R = K_full u - f_ext, somente nos DOFs prescritos (livres devem residual ~0).
     f_int = assemble_vector(fem.form(ufl.inner(sigma(uh), epsilon(v)) * ufl.dx))
     try:
         f_int.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
     except Exception:
         pass
-    rvec = f_int.array.copy()
-    try:
-        ext = f_ext.array
-        n = min(rvec.size, ext.size)
-        rvec[:n] = rvec[:n] - ext[:n]
-    except Exception:
-        # petsc4py Vec
-        ext = f_ext.getArray(readonly=True)
-        n = min(rvec.size, ext.size)
-        rvec[:n] = rvec[:n] - ext[:n]
+
+    constrained_rows = constrained_rows or []
+    applied = applied or {"Fx": 0.0, "Fy": 0.0, "Fz": 0.0}
+    coords_by_nid = {nid: (n.x, n.y, n.z) for nid, n in model.nodes.items()}
+    rx = residual_on_constrained(f_int, f_ext, constrained_rows, coords_by_nid)
 
     V = uh.function_space
     rf = fem.Function(V)
     rf.name = "reaction_force"
     rf.x.array[:] = 0.0
-    mlen = min(rf.x.array.size, rvec.size)
-    rf.x.array[:mlen] = rvec[:mlen]
+    mlen = min(rf.x.array.size, rx["rf_constrained"].size)
+    rf.x.array[:mlen] = rx["rf_constrained"][:mlen]
     rf.x.scatter_forward()
     rf_pvd = write_functions_vtk(domain.comm, [rf], output_base + "_RF")
 
-    totals = {"RFx": 0.0, "RFy": 0.0, "RFz": 0.0}
-    # Soma nos nos de model.boundary (presos)
-    coords = domain.geometry.x
-    dim = domain.geometry.dim
-    seen = set()
-    for bc in model.boundary:
-        if bc.node in seen or bc.node not in model.nodes:
+    totals = rx["totals"]
+    sum_rf = {
+        "Fx": totals["RFx"] + applied["Fx"],
+        "Fy": totals["RFy"] + applied["Fy"],
+        "Fz": totals["RFz"] + applied["Fz"],
+    }
+    # Momento das cargas aplicadas em torno da origem.
+    mom_f = {"Mx": 0.0, "My": 0.0, "Mz": 0.0}
+    for cl in (model.steps[0].loads if model.steps else []):
+        if cl.node not in model.nodes:
             continue
-        seen.add(bc.node)
-        n = model.nodes[bc.node]
-        dist = np.linalg.norm(coords - np.array([n.x, n.y, n.z]), axis=1)
-        node_idx = int(np.argmin(dist))
-        if dist[node_idx] > 1e-6:
-            continue
-        totals["RFx"] += float(rvec[node_idx * dim + 0]) if node_idx * dim + 0 < rvec.size else 0.0
-        totals["RFy"] += float(rvec[node_idx * dim + 1]) if node_idx * dim + 1 < rvec.size else 0.0
-        totals["RFz"] += float(rvec[node_idx * dim + 2]) if node_idx * dim + 2 < rvec.size else 0.0
+        n = model.nodes[cl.node]
+        fx = cl.value if cl.dof == 1 else 0.0
+        fy = cl.value if cl.dof == 2 else 0.0
+        fz = cl.value if cl.dof == 3 else 0.0
+        mom_f["Mx"] += n.y * fz - n.z * fy
+        mom_f["My"] += n.z * fx - n.x * fz
+        mom_f["Mz"] += n.x * fy - n.y * fx
+    mom_sum = {
+        "Mx": rx["moment_R_origin"]["Mx"] + mom_f["Mx"],
+        "My": rx["moment_R_origin"]["My"] + mom_f["My"],
+        "Mz": rx["moment_R_origin"]["Mz"] + mom_f["Mz"],
+    }
 
     react_path = output_base + "_reactions.json"
+    payload = {
+        "totals": totals,
+        "applied_totals": applied,
+        "sum_R_plus_F": sum_rf,
+        "moment_R_origin": rx["moment_R_origin"],
+        "moment_F_origin": mom_f,
+        "moment_R_plus_F_origin": mom_sum,
+        "n_constrained_dofs": rx["n_constrained_dofs"],
+        "residual_free_dofs_max_abs": rx["residual_free_dofs_max_abs"],
+        "entries": rx["entries"],
+        "note": (
+            "RF = (K_full u - f_ext) apenas em DOFs prescritos. "
+            "Equilibrio de forca/momento: sum(R+F) e momentos em torno da origem ~0. "
+            "Nao e aceite de roda/Luiz."
+        ),
+    }
     with open(react_path, "w", encoding="utf-8") as handle:
-        json.dump({"totals": totals, "n_constrained_nodes": len(seen)}, handle, indent=2)
+        json.dump(payload, handle, indent=2)
         handle.write("\n")
 
     if debug:
         print("FC campos celula:", cell_pvd)
-        print("FC RF:", totals)
+        print("FC RF:", totals, "R+F:", sum_rf, "free residual max:", rx["residual_free_dofs_max_abs"])
 
     honored = ["U", "S", "E", "PRINCIPAL", "VON_MISES", "RF"]
     artifacts = [
         {"path": output_base + ".pvd", "field": "U", "location": "nodal-CG1", "space": "Lagrange-P1"},
         {"path": cell_pvd, "field": "S,E,PRINCIPAL,VON_MISES", "location": "cell-DG0-constant-C3D4-P1",
          "tensor_order": "row-major XX,XY,XZ,YX,YY,YZ,ZX,ZY,ZZ",
-         "principals": "algebraic sigma1>=sigma2>=sigma3 with sign",
+         "principals": "algebraic sigma1>=sigma2>=sigma3 with sign; tensor symmetrized before eig",
          "note": "nodal smoothed does not replace cell field"},
-        {"path": rf_pvd, "field": "RF", "location": "nodal"},
+        {"path": rf_pvd, "field": "RF", "location": "nodal-constrained-dofs-only"},
         {"path": react_path, "field": "RF_totals", "location": "json"},
     ]
-    return {"honored": honored, "artifacts": artifacts, "reactions": totals}
+    return {
+        "honored": honored,
+        "artifacts": artifacts,
+        "reactions": payload,
+        "applied": applied,
+        "stress_cells": sigma_cells,
+        "principals": principals,
+        "von_mises": vm,
+    }
+
+
+def _check_fc_force_balance(extra, rel=1e-5, abs_tol=1e-6):
+    """Recusa sucesso se R+F (e momentos) nao fecharem no residual do proprio solver.
+
+    Tolerancia numerica de consistencia (LU / residual), nao aceite Luiz/GateV.
+    """
+    rx = extra.get("reactions") or {}
+    sum_rf = rx.get("sum_R_plus_F") or {}
+    mom = rx.get("moment_R_plus_F_origin") or {}
+    applied = rx.get("applied_totals") or extra.get("applied") or {}
+    totals = rx.get("totals") or {}
+    scale_f = max(
+        [abs_tol, abs(float(applied.get("Fx", 0.0))), abs(float(applied.get("Fy", 0.0))),
+         abs(float(applied.get("Fz", 0.0))), abs(float(totals.get("RFx", 0.0))),
+         abs(float(totals.get("RFy", 0.0))), abs(float(totals.get("RFz", 0.0)))]
+    )
+    for key in ("Fx", "Fy", "Fz"):
+        val = abs(float(sum_rf.get(key, 0.0)))
+        if val > max(abs_tol, rel * scale_f):
+            raise RuntimeError(
+                "Equilibrio de forca nao fechou no perfil FC ({0}={1}, escala={2}). "
+                "Nao e sucesso.".format(key, sum_rf.get(key), scale_f)
+            )
+    # momento: escala caracteristica ~ forca * 1 (coords em mm da malha local)
+    scale_m = scale_f
+    for key in ("Mx", "My", "Mz"):
+        val = abs(float(mom.get(key, 0.0)))
+        if val > max(abs_tol, rel * scale_m * 10.0):
+            raise RuntimeError(
+                "Equilibrio de momento nao fechou no perfil FC ({0}={1}). "
+                "Nao e sucesso.".format(key, mom.get(key))
+            )
 
 
 def _stack_versions():
@@ -395,7 +488,7 @@ def _stack_versions():
     return info
 
 
-def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug):
+def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug, run_id=None):
     rec = model.fc_record
     honored = []
     artifacts = []
@@ -409,6 +502,9 @@ def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug):
     check_honored_outputs(requested, honored)
 
     payload = {
+        "status": "ok",
+        "run_id": run_id,
+        "solver_run": True,
         "profile": "fc",
         "units": units_norm,
         "inp": os.path.abspath(inp_path),
@@ -431,11 +527,11 @@ def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug):
         "honored_fields": honored,
         "field_contract": {
             "U": "nodal Lagrange P1",
-            "S": "Cauchy cell DG0, constant on C3D4 P1; not nodal-smoothed",
+            "S": "Cauchy cell DG0, constant on C3D4 P1; not nodal-smoothed; symmetrized before principals",
             "E": "infinitesimal strain cell DG0",
             "PRINCIPAL": "algebraic sigma1>=sigma2>=sigma3 with sign, cell DG0",
             "VON_MISES": "cell DG0",
-            "RF": "reactions at constrained nodes and totals",
+            "RF": "residual K_full u - f_ext at constrained DOFs only, plus force/moment totals",
         },
         "static_increments": rec.static_increments if rec else None,
         "reactions": reactions,
@@ -452,16 +548,20 @@ def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug):
         "artifacts": artifacts,
         "limits": {
             "wheel_validation": False,
-            "independent_benchmark": False,
+            "independent_benchmark": "axial+compressao analitica em fixture sintetica; GateV pendente",
             "material_plan_70000": "nao corrigido automaticamente se o .inp trouxer outro E",
+            "mpi": "serial only (MPI size=1)",
         },
     }
     manifest_path = write_run_manifest(output_dir, payload)
     required = [os.path.basename(a["path"]) for a in artifacts if a.get("path")]
-    required.append("run_manifest.json")
-    # include manifest itself in verification after writing hash
-    # re-write payload with manifest listed then verify others
-    verify_run_artifacts(manifest_path, required[:-1])
+    verify_run_artifacts(manifest_path, required)
+    write_run_status(output_dir, {
+        "status": "ok",
+        "run_id": run_id,
+        "solver_run": True,
+        "manifest": manifest_path,
+    })
     if debug:
         print("Manifesto:", manifest_path)
 
@@ -476,20 +576,61 @@ if __name__ == "__main__":
     if not args.inp_file:
         print(USAGE)
         sys.exit(1)
+    output_dir = resolve_output_dir(args.output_dir)
+    run_id = str(uuid.uuid4())
+    profile_fc = (args.profile or "").strip().lower() == "fc"
     try:
         run_from_inp(
             args.inp_file,
-            output_dir=resolve_output_dir(args.output_dir),
+            output_dir=output_dir,
             debug=args.debug,
             profile=args.profile,
             units=args.units,
+            parse_only=args.parse_only,
+            run_id=run_id,
         )
     except FCProfileError as exc:
         print("ERRO FC: {0}".format(exc))
+        if profile_fc:
+            try:
+                write_run_status(prepare_output_dir(output_dir), {
+                    "status": "failed",
+                    "run_id": run_id,
+                    "solver_run": False if args.parse_only else True,
+                    "error": str(exc),
+                    "error_class": "FCProfileError",
+                    "note": "falha: manifesto de sucesso anterior neste diretorio nao vale para esta run",
+                })
+            except Exception:
+                pass
         sys.exit(2)
     except RuntimeError as exc:
         print("ERRO: {0}".format(exc))
+        if profile_fc:
+            try:
+                write_run_status(prepare_output_dir(output_dir), {
+                    "status": "failed",
+                    "run_id": run_id,
+                    "solver_run": True,
+                    "error": str(exc),
+                    "error_class": "RuntimeError",
+                    "note": "falha: manifesto de sucesso anterior neste diretorio nao vale para esta run",
+                })
+            except Exception:
+                pass
         sys.exit(3)
     except Exception as exc:
         print("ERRO: {0}: {1}".format(type(exc).__name__, exc))
+        if profile_fc:
+            try:
+                write_run_status(prepare_output_dir(output_dir), {
+                    "status": "failed",
+                    "run_id": run_id,
+                    "solver_run": True,
+                    "error": "{0}: {1}".format(type(exc).__name__, exc),
+                    "error_class": type(exc).__name__,
+                    "note": "falha: manifesto de sucesso anterior neste diretorio nao vale para esta run",
+                })
+            except Exception:
+                pass
         sys.exit(3)

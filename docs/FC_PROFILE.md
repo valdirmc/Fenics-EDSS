@@ -52,3 +52,36 @@ O plano falava E=70000 MPa, nu=0.33. O INP de referencia de Luiz (`FEMMeshGmsh.i
 - Nao roda o modelo de 125395 nos / 476960 C3D4 (sem estimativa de recurso nesta passagem).
 - Nao afirma validacao de roda, benchmark independente, nem identidade com CalculiX.
 - Go/no-go alvo do usuario: 13/11. Nao promete roda aceita.
+
+## Lote 2 (validacao/robustez, 11/11/2026)
+
+Opt-in inalterado. Correções e contratos adicionais:
+
+- Indexacao: `create_mesh` pode reordenar vertices. CLOAD/RF/material nao usam `node_idx * 3` nem o `coords` de entrada (no lote 1 o CLOAD referencia `coords` fora de escopo — regressao corrigida). Mapas: no INP → vertice `geometry.x` (coordenadas unicas) e elemento INP → celula (conjunto de vertices).
+- CLOAD acumula no DOF localizado por `locate_dofs_geometrical` (mesmo criterio das BC). Duas linhas no mesmo no/DOF somam.
+- `*BOUNDARY`: CalculiX e `no, dof_ini, dof_fim[, valor]`. Tres colunas com valor flutuante sao ambiguas e rejeitadas no FC; valor nao nulo exige 4 colunas.
+- Matriz completa (sem BC) para residual; matriz com BC so no solve. RF = `K_full u - f_ext` apenas nos DOFs prescritos. JSON traz `sum_R_plus_F` e momentos na origem. Desequilibrio acima da tolerancia numerica de consistencia recusa sucesso.
+- MPI: perfil FC so em serial (`size=1`). `size>1` e rejeitado (ghosts nao validados).
+- Tensor de Cauchy simetrizado `(S+S.T)/2` antes dos principais; ordem algebrica `σ1≥σ2≥σ3` com sinal; von Mises a partir desses principais.
+- `*EXPANSION` so pode ser ignorado no perfil estritamente mecanico, sem temperatura; `*TEMPERATURE` / `*INITIAL CONDITIONS` / fluxos termicos sao bloqueados.
+- `INC` em `*STEP` permanece ignorado de forma explicita no estatico linear de um incremento.
+- `*OUTPUT` so e honrado com `FREQUENCY=1` (ou sem parametro). Outro parametro e rejeitado: reconhecer o cartao nao basta.
+- CLI: `--parse-only` grava `parse_report.json` com `STATUS: parse_ok_not_solved` e **nao** executa o solver nem gera manifesto de sucesso. O parser CLI imprime o mesmo aviso.
+- `run_status.json` (`started` / `ok` / `failed` / `parse_ok_not_solved`) com `run_id`. Manifesto antigo no diretorio nao conta como sucesso da run atual. Falha de parse/solver/VTK nao reescreve manifesto `ok`.
+- Sistema sem `*BOUNDARY` e recusado (LU que nao acusa singularidade nao e sucesso). Solucao com NaN/Inf ou KSP nao convergido e recusada.
+
+### Fixture analitica (nao e a roda)
+
+Prisma triangular de 6 nos / 3 C3D4, L=1 mm, A=0,5 mm², E=70000 MPa, ν=0,33, Fz=−50 N (tracao constante no topo, cargas consistentes F_i=A t/3; Zienkiewicz & Taylor, vetor de carga do triangulo linear). Estado uniaxial no espaco P1:
+
+- σ_zz=F/A=−100 MPa, demais nulas; principais (0, 0, −100); von Mises=100 MPa
+- ε_zz=σ_zz/E, ε_lat=−ν σ_zz/E
+- ΣR+ΣF=0 e momentos na origem ~0, com DOFs livres no topo
+
+Tolerancia dos testes: abs 1e-6 MPa/N ou 1e-8 mm (LU, campo no espaco FE). **Nao** e aceite de Luiz nem GateV aprovado. Ha tambem caso de deslocamento prescrito nao nulo (sem CLOAD) e casos de erro (sem BC, parse-only, lixo velho).
+
+Flexao/convergencia formal ficou para o proximo lote (o axial+compressao fechou neste).
+
+### Caso auxiliar E=71700 (decisao Valdir, 11/11/2026)
+
+Autorizado usar o INP original de Luiz (E=71700 MPa, cargas simplificadas) **apenas como teste auxiliar**, preservando o arquivo e o hash, com saidas rotuladas AUXILIAR/E71700/cargas simplificadas. O caso definitivo permanece E=70000 e o perfil combinado. Este lote **nao rodou** o modelo de 125395 nos / 476960 C3D4: o solver FC ainda usa LU direto, e nao ha medicao que mostre caber com margem no teto isolado de 2 GB sem risco a outros processos da Nitro. Comparacoes CCX so com campos/localizacao compativeis e tolerancias fornecidas; nenhuma tolerancia de aceite foi inventada.

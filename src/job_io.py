@@ -22,12 +22,13 @@ DEFAULT_OUTPUT_DIR = "/app/output"
 USAGE = (
     "Uso: python3 run_from_inp.py arquivo.inp "
     "[--output-dir DIR | -output DIR] [--profile fc] "
-    "[--units mm-N-MPa-t-s] [-debug=1]\n"
+    "[--units mm-N-MPa-t-s] [--parse-only] [-debug=1]\n"
     "  arquivo.inp            caminho do .inp deste job\n"
     "  --output-dir, -output  diretorio de saida deste job "
     f"(padrao: {DEFAULT_OUTPUT_DIR})\n"
     "  --profile fc           whitelist fechada e contrato de saidas FC\n"
     "  --units                obrigatorio com --profile fc (mm-N-MPa-t-s)\n"
+    "  --parse-only           valida o parse e para; NAO executa o solver\n"
     "  -debug=1               imprime diagnostico"
 )
 
@@ -47,12 +48,14 @@ class RunArgs:
         debug: int,
         profile: Optional[str] = None,
         units: Optional[str] = None,
+        parse_only: bool = False,
     ):
         self.inp_file = inp_file
         self.output_dir = output_dir
         self.debug = debug
         self.profile = profile
         self.units = units
+        self.parse_only = parse_only
 
     def __iter__(self):
         yield self.inp_file
@@ -74,6 +77,7 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
     inp_file: Optional[str] = None
     profile: Optional[str] = None
     units: Optional[str] = None
+    parse_only = False
     args: List[str] = list(argv)
     i = 0
     while i < len(args):
@@ -110,6 +114,8 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
             units = args[i]
         elif arg.startswith("--units="):
             units = arg.split("=", 1)[1]
+        elif arg in ("--parse-only",):
+            parse_only = True
         elif arg.startswith("-"):
             raise ValueError(f"opcao desconhecida: {arg}")
         else:
@@ -123,7 +129,9 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
         profile = str(profile).strip().lower()
         if profile not in ("fc",):
             raise ValueError("perfil desconhecido: {0} (use fc)".format(profile))
-    return RunArgs(inp_file, output_dir, debug, profile=profile, units=units)
+    return RunArgs(
+        inp_file, output_dir, debug, profile=profile, units=units, parse_only=parse_only
+    )
 
 
 def resolve_output_dir(output_dir: Optional[str]) -> str:
@@ -243,6 +251,19 @@ def file_sha256(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def write_run_status(output_dir: str, payload: Dict[str, Any]) -> str:
+    """Grava run_status.json. Sucesso so quando status=ok e run_id casa com o manifesto."""
+    directory = os.path.abspath(output_dir)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "run_status.json")
+    payload = dict(payload)
+    payload["written_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    return path
 
 
 def write_run_manifest(output_dir: str, payload: Dict[str, Any]) -> str:

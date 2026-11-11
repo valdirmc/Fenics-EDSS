@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -100,6 +101,8 @@ def test_fc_rejeita_multistep(tmp_path):
         ("*HYPERELASTIC, NEO HOOKE\n1.0, 0.1\n", "HYPERELASTIC"),
         ("*PLASTIC\n", "PLASTIC"),
         ("*FREQUENCY\n", "FREQUENCY"),
+        ("*TEMPERATURE\n1, 20\n", "TEMPERATURE"),
+        ("*INITIAL CONDITIONS, TYPE=TEMPERATURE\nNall, 20\n", "INITIAL CONDITIONS"),
         ("*FOO\n", "whitelist"),
     ],
 )
@@ -152,3 +155,99 @@ def test_principais_algebricos_com_sinal():
     assert vm[0] == pytest.approx((0.5 * ((4-1)**2 + (1-(-10))**2 + ((-10)-4)**2)) ** 0.5)
 
 
+def test_fc_rejeita_output_frequency_nao_honrada(tmp_path):
+    text = MIN_C3D4.replace("*NODE FILE", "*OUTPUT, FREQUENCY=2\n*NODE FILE")
+    with pytest.raises(FCProfileError, match="OUTPUT nao honrado"):
+        parse_inp(_w(tmp_path, "out2.inp", text), profile="fc")
+
+
+def test_fc_aceita_output_frequency_1(tmp_path):
+    text = MIN_C3D4.replace("*NODE FILE", "*OUTPUT, FREQUENCY=1\n*NODE FILE")
+    model = parse_inp(_w(tmp_path, "out1.inp", text), profile="fc")
+    keys = [k for _ln, k in ((item[0], item[1]) for item in model.fc_record.keywords)]
+    # keywords store header strings
+    headers = [h for _i, h in model.fc_record.keywords]
+    assert any("OUTPUT" in h.upper() for h in headers)
+
+
+def test_fc_rejeita_expansion_com_temperatura(tmp_path):
+    text = MIN_C3D4.replace(
+        "*SOLID SECTION",
+        "*EXPANSION, ZERO=0\n2.36E-05\n*TEMPERATURE\n1, 20\n*SOLID SECTION",
+    )
+    with pytest.raises(FCProfileError, match="TEMPERATURE"):
+        parse_inp(_w(tmp_path, "exp_temp.inp", text), profile="fc")
+
+
+def test_parse_nao_afirma_solver_valido(tmp_path):
+    from fc_profile import PARSE_NOT_SOLVED_BANNER, parse_report_payload
+    model = parse_inp(_w(tmp_path, "ok.inp", MIN_C3D4), profile="fc")
+    payload = parse_report_payload(model, "ok.inp")
+    assert payload["status"] == "parse_ok_not_solved"
+    assert payload["solver_run"] is False
+    assert "somente de parse" in payload["warning"]
+    assert "parse_ok_not_solved" in PARSE_NOT_SOLVED_BANNER
+    assert "Nao implica solver valido" in PARSE_NOT_SOLVED_BANNER
+
+
+def test_cli_parse_only():
+    args = parse_run_args(["caso.inp", "--profile", "fc", "--units", "mm-N-MPa-t-s", "--parse-only", "--output-dir", "/tmp/out"])
+    assert args.parse_only is True
+
+
+def test_run_status_e_lixo_velho_nao_contam(tmp_path):
+    from job_io import write_run_manifest, write_run_status, verify_run_artifacts, file_sha256
+    out = tmp_path / "out"
+    out.mkdir()
+    stale = out / "old.pvd"
+    stale.write_text("VELHO", encoding="utf-8")
+    old_manifest = write_run_manifest(str(out), {
+        "status": "ok",
+        "run_id": "old-run",
+        "artifacts": [{"path": str(stale), "field": "U"}],
+    })
+    # nova run falha: status failed, mesmo manifesto antigo no disco
+    status = write_run_status(str(out), {"status": "failed", "run_id": "new-run", "error": "teste"})
+    data = (out / "run_status.json").read_text(encoding="utf-8")
+    assert '"status": "failed"' in data
+    assert "new-run" in data
+    # manifesto antigo continua no disco, mas o status atual nao e ok
+    assert Path(old_manifest).is_file()
+    # hash do lixo velho nao deve ser usado como sucesso da nova run
+    stale.write_text("ALTERADO", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="lixo velho"):
+        verify_run_artifacts(old_manifest, ["old.pvd"])
+
+
+def test_principais_compressao_uniaxial_e_cisalhamento():
+    sigma = np.zeros((2, 3, 3))
+    # celula 0: compressao uniaxial
+    sigma[0, 2, 2] = -100.0
+    # celula 1: cisalhamento puro + residual assimetrico
+    sigma[1, 0, 1] = 30.0
+    sigma[1, 1, 0] = 29.0
+    pr, vm = principals_algebraic(sigma)
+    assert pr[0, 0] == pytest.approx(0.0)
+    assert pr[0, 1] == pytest.approx(0.0)
+    assert pr[0, 2] == pytest.approx(-100.0)
+    assert vm[0] == pytest.approx(100.0)
+    assert pr[1, 0] >= pr[1, 1] >= pr[1, 2]
+    # cisalhamento simetrizado (~29.5): principais +29.5, 0, -29.5
+    assert pr[1, 0] == pytest.approx(29.5)
+    assert pr[1, 1] == pytest.approx(0.0)
+    assert pr[1, 2] == pytest.approx(-29.5)
+    assert vm[1] == pytest.approx((0.5 * (2 * (29.5 ** 2) + (29.5 - (-29.5)) ** 2)) ** 0.5)
+
+
+def test_fc_rejeita_boundary_3_colunas_valor(tmp_path):
+    # Formato "no, dof, valor" e ambiguo: CalculiX interpreta a 3a coluna como dof_fim.
+    text = MIN_C3D4.replace("Fixos,1\nFixos,2\nFixos,3", "4, 3, -0.001")
+    with pytest.raises(FCProfileError, match="3 colunas"):
+        parse_inp(_w(tmp_path, "bc3.inp", text), profile="fc")
+
+
+def test_fc_aceita_boundary_4_colunas_valor(tmp_path):
+    text = MIN_C3D4.replace("Fixos,1\nFixos,2\nFixos,3", "4, 3, 3, -0.001")
+    model = parse_inp(_w(tmp_path, "bc4.inp", text), profile="fc")
+    vals = {(bc.node, bc.dof, bc.value) for bc in model.boundary}
+    assert (4, 3, -0.001) in vals

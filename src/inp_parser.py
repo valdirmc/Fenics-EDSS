@@ -20,6 +20,8 @@ from fc_profile import (
     keyword_params,
     normalize_keyword,
     validate_fc_cards,
+    parse_report_payload,
+    PARSE_NOT_SOLVED_BANNER,
 )
 
 
@@ -331,12 +333,32 @@ def parse_inp(path: str, debug: int = 0, profile: Optional[str] = None) -> INPMo
                 parts = raw_parts
                 if len(parts) >= 2 and not lines[i].strip().startswith("**"):
                     target = parts[0]
-                    dof_start = int(parts[1])
-                    if len(parts) >= 3 and parts[2] != "":
-                        dof_end = int(parts[2])
-                    else:
-                        dof_end = dof_start
-                    value = float(parts[3]) if len(parts) > 3 and parts[3] else 0.0
+                    if profile_fc and len(parts) == 3 and parts[2] != "":
+                        third = parts[2]
+                        looks_value = ("." in third) or ("e" in third.lower()) or (
+                            third.lstrip("+-").isdigit() and int(third) not in range(1, 7)
+                        )
+                        if looks_value:
+                            raise FCProfileError(
+                                "L{0}: *BOUNDARY com 3 colunas e ambiguo no perfil FC. "
+                                "CalculiX usa no, dof_ini, dof_fim[, valor]. "
+                                "Use 2 colunas (valor 0) ou 4 colunas (no, ini, fim, valor). "
+                                "Linha: {1}".format(i + 1, lines[i].strip())
+                            )
+                    try:
+                        dof_start = int(parts[1])
+                        if len(parts) >= 3 and parts[2] != "":
+                            dof_end = int(parts[2])
+                        else:
+                            dof_end = dof_start
+                        value = float(parts[3]) if len(parts) > 3 and parts[3] else 0.0
+                    except ValueError as exc:
+                        raise FCProfileError(
+                            "L{0}: *BOUNDARY invalido no perfil FC ({1}). "
+                            "Formato: no, dof_ini[, dof_fim[, valor]]. Linha: {2}".format(
+                                i + 1, exc, lines[i].strip()
+                            )
+                        ) from exc
                     nodes_to_apply = []
                     if target.isdigit():
                         nodes_to_apply = [int(target)]
@@ -468,15 +490,36 @@ def parse_inp(path: str, debug: int = 0, profile: Optional[str] = None) -> INPMo
             continue
 
         if key == "OUTPUT":
-            # FREQUENCY=1 com um unico incremento e honrado; nao e silencia.
+            # Parametros sao validados em validate_fc_cards: so FREQUENCY=1
+            # e honrado. Reconhecer o cartao nao implica saida honrada.
             i += 1
+            while i < len(lines) and not _is_keyword_line(lines[i]):
+                s = lines[i].strip()
+                if s and not s.startswith("**") and profile_fc:
+                    raise FCProfileError(
+                        "L{0}: dados sob *OUTPUT nao sao honrados no perfil FC: {1}".format(
+                            i + 1, s
+                        )
+                    )
+                i += 1
             continue
 
         if key in EXPLICITLY_IGNORED_KEYWORDS:
+            if key == "EXPANSION":
+                reason = (
+                    "EXPANSION ignorado somente no perfil estritamente mecanico, "
+                    "sem temperatura: o coeficiente nao entra na formulacao. "
+                    "Cartao termico concomitante e rejeitado."
+                )
+            else:
+                reason = (
+                    "metadado ignorado explicitamente (nao altera a estatica "
+                    "mecanica do perfil FC)"
+                )
             fc_record.ignored.append(
                 IgnoredItem(
                     key,
-                    "metadado ignorado explicitamente (nao altera a estatica mecanica do perfil FC)",
+                    reason,
                     lineno,
                     line,
                 )
@@ -577,7 +620,14 @@ if __name__ == "__main__":
         print("ERRO FC: {0}".format(exc))
         sys.exit(2)
     print(summary(model))
-    if model.fc_record:
+    if (profile or "").strip().lower() == "fc":
+        print(PARSE_NOT_SOLVED_BANNER)
+        rec = model.fc_record
+        if rec:
+            print("Keywords:", len(rec.keywords))
+            print("Ignorados explicitos:", [(i.keyword, i.reason) for i in rec.ignored])
+            print("Pedidos de saida:", [(r.kind, r.fields, r.nset) for r in rec.requests])
+    elif model.fc_record:
         rec = model.fc_record
         print("Keywords:", len(rec.keywords))
         print("Ignorados explicitos:", [(i.keyword, i.reason) for i in rec.ignored])

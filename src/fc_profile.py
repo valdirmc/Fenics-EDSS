@@ -63,7 +63,33 @@ BLOCKED_KEYWORDS: Set[str] = {
     "TIE",
     "AMPLITUDE",
     "INCLUDE",
+    "TEMPERATURE",
+    "INITIAL CONDITIONS",
+    "CFLUX",
+    "DFLUX",
+    "FILM",
+    "RADIATE",
+    "SPECIFIC HEAT",
 }
+
+# Cartões térmicos: *EXPANSION só pode ser ignorado se nenhum destes aparecer.
+THERMAL_PHYSICS_KEYWORDS: Set[str] = {
+    "TEMPERATURE",
+    "INITIAL CONDITIONS",
+    "HEAT TRANSFER",
+    "CONDUCTIVITY",
+    "CFLUX",
+    "DFLUX",
+    "FILM",
+    "RADIATE",
+    "SPECIFIC HEAT",
+}
+
+PARSE_NOT_SOLVED_BANNER = (
+    "STATUS: parse_ok_not_solved\n"
+    "AVISO: relatorio de parse apenas. Nao implica solver valido, "
+    "equilibrio, honra de saidas na execucao, nem artefatos VTK."
+)
 
 REQUIRED_FIELDS_ALWAYS = ("U", "S", "PRINCIPAL", "VON_MISES")
 
@@ -182,6 +208,28 @@ def validate_fc_cards(record: FCParseRecord, element_types: Iterable[str], n_ste
                 "um incremento com periodo 1 (lido: {0}).".format(inc)
             )
 
+    seen = [normalize_keyword(h) for _, h in record.keywords]
+    if "EXPANSION" in seen and any(k in THERMAL_PHYSICS_KEYWORDS for k in seen):
+        errors.append(
+            "*EXPANSION so pode ser ignorado num perfil estritamente mecanico, "
+            "sem temperatura/fluxo termico. Ha cartao termico no .inp; "
+            "ignorar a dilatacao perderia fisica."
+        )
+
+    for lineno, header in record.keywords:
+        if normalize_keyword(header) != "OUTPUT":
+            continue
+        params = keyword_params(header)
+        for param in params:
+            compact = param.upper().replace(" ", "")
+            if compact in {"FREQUENCY=1", "FREQ=1"}:
+                continue
+            errors.append(
+                "L{0}: *OUTPUT nao honrado (parametro {1}). "
+                "Reconhecer o cartao nao basta; o perfil FC so aceita "
+                "FREQUENCY=1 com um unico incremento.".format(lineno, param)
+            )
+
     if errors:
         raise FCProfileError("Rejeicao do perfil FC:\n- " + "\n- ".join(errors))
 
@@ -203,3 +251,30 @@ def check_honored_outputs(requested: Sequence[str], honored: Sequence[str]) -> N
             + ", ".join(missing)
             + ". Nao basta o parser aceitar o .inp."
         )
+
+
+def parse_report_payload(model, inp_path: str = "") -> dict:
+    """Relatorio de parse. Nunca afirma que o solver e valido."""
+    rec = getattr(model, "fc_record", None)
+    return {
+        "status": "parse_ok_not_solved",
+        "solver_run": False,
+        "profile": "fc",
+        "inp": inp_path,
+        "n_nodes": len(model.nodes),
+        "n_elements": len(model.elements),
+        "n_steps": len(model.steps),
+        "element_types": sorted({el.type.upper() for el in model.elements.values()}),
+        "ignored_cards": [
+            {"keyword": it.keyword, "reason": it.reason, "line": it.line, "detail": it.detail}
+            for it in (rec.ignored if rec else [])
+        ],
+        "output_requests": [
+            {"kind": r.kind, "fields": r.fields, "nset": r.nset, "totals_only": r.totals_only, "line": r.line}
+            for r in (rec.requests if rec else [])
+        ],
+        "warning": (
+            "Este relatorio e somente de parse. Nao significa que o solver, "
+            "o equilibrio ou os artefatos VTK sejam validos."
+        ),
+    }

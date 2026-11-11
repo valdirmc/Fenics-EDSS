@@ -30,6 +30,9 @@ def principals_algebraic(sigma: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """sigma: (n,3,3) simetrico. Retorna (n,3) com s1>=s2>=s3 e von Mises (n,)."""
     if sigma.ndim != 3 or sigma.shape[1:] != (3, 3):
         raise ValueError("sigma deve ter forma (n,3,3)")
+    # C3D4 P1: tensao constante por celula. Simetriza residual numerico
+    # (sigma = (S+S.T)/2) antes dos autovalores; eigvalsh exige simetria.
+    sigma = 0.5 * (np.asarray(sigma, dtype=float) + np.swapaxes(sigma, -1, -2))
     eig = np.linalg.eigvalsh(sigma)
     principals = eig[:, ::-1].copy()
     s1, s2, s3 = principals[:, 0], principals[:, 1], principals[:, 2]
