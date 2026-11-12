@@ -5,6 +5,7 @@ Detecta o tipo (estática ou térmica) e chama a função apropriada.
 """
 
 import json
+import time
 import sys
 import os
 import uuid
@@ -43,6 +44,8 @@ from fc_assembly import (
     collect_constrained_dofs,
     inp_element_to_cell,
     inp_node_to_geom,
+    log_fc_stage,
+    mem_profile_enabled,
     require_serial_fc,
     residual_on_constrained,
 )
@@ -93,17 +96,23 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
     """Executa um step de estatica linear com multiplos materiais."""
     profile_fc = (profile or "").strip().lower() == "fc"
     require_serial_fc(MPI.COMM_WORLD, profile_fc)
+    t0 = time.perf_counter()
+    stages = [] if mem_profile_enabled() else None
     domain, node_map = build_mesh_from_inp(model, debug=debug)
+    log_fc_stage("mesh", t0, stages)
 
     domain.topology.create_connectivity(0, domain.topology.dim)
     domain.topology.create_connectivity(domain.topology.dim, 0)
 
     nid_to_geom = inp_node_to_geom(domain, model)
+    log_fc_stage("inp_node_to_geom", t0, stages)
     eid_to_cell = inp_element_to_cell(domain, model, nid_to_geom)
+    log_fc_stage("inp_element_to_cell", t0, stages)
     if debug:
         print(f"Mapa INP->geom: {len(nid_to_geom)} nos; INP->celula: {len(eid_to_cell)} elems")
 
     V = fem.functionspace(domain, ("Lagrange", 1, (domain.geometry.dim,)))
+    log_fc_stage("functionspace", t0, stages)
 
     # Materiais por célula (DG-0). Indices de celula via mapa INP, nao enumeracao crua.
     Q = fem.functionspace(domain, ("DG", 0))
@@ -131,6 +140,7 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
 
     E_func.x.scatter_forward()
     nu_func.x.scatter_forward()
+    log_fc_stage("materials", t0, stages)
 
     if debug:
         print(f"Materiais aplicados: E min={E_func.x.array.min():.0f}, max={E_func.x.array.max():.0f}")
@@ -141,6 +151,7 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
     lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
 
     bcs, constrained_rows = collect_constrained_dofs(V, model, profile_fc)
+    log_fc_stage("collect_constrained_dofs", t0, stages)
     if profile_fc and not constrained_rows:
         raise RuntimeError(
             "Perfil FC recusa sistema sem DOFs prescritos (*BOUNDARY). "
@@ -162,14 +173,16 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
     a_form = fem.form(a)
     L_compiled = fem.form(L_form)
 
-    # Matriz completa (sem BC) para residual/RF; matriz com BC so no solve.
-    A_full = assemble_matrix(a_form)
-    A_full.assemble()
+    # RF usa assemble_vector da forma (K u esparso), nao uma copia densa nem A_full.
+    # Matriz com BC so no solve.
     A = assemble_matrix(a_form, bcs=bcs)
     A.assemble()
+    log_fc_stage("assemble_A", t0, stages)
     b = assemble_vector(L_compiled)
+    log_fc_stage("assemble_b", t0, stages)
 
     applied = apply_cloads(V, b, model, step, profile_fc)
+    log_fc_stage("apply_cloads", t0, stages)
 
     if step.dloads:
         if profile_fc:
@@ -216,6 +229,7 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
         ) from exc
     uh.x.scatter_forward()
     check_solution_finite(uh, solver)
+    log_fc_stage("solve_lu", t0, stages)
     uh.name = "displacement"
 
     write_vtk_function(domain.comm, uh, output_base, debug=debug)
@@ -228,6 +242,7 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
             domain, uh, v, sigma, epsilon, f_ext, a_form, model, output_base, debug,
             constrained_rows=constrained_rows, applied=applied,
         )
+        log_fc_stage("fc_fields_rf", t0, stages)
         _check_fc_force_balance(extra)
 
     norma = np.linalg.norm(uh.x.array)
@@ -353,7 +368,7 @@ def _write_fc_linear_fields(domain, uh, v, sigma, epsilon, f_ext, a_form, model,
         output_base + "_cell",
     )
 
-    # R = K_full u - f_ext, somente nos DOFs prescritos (livres devem residual ~0).
+    # R = K u - f_ext (assemble_vector esparso), somente nos DOFs prescritos (livres ~0).
     f_int = assemble_vector(fem.form(ufl.inner(sigma(uh), epsilon(v)) * ufl.dx))
     try:
         f_int.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)

@@ -58,9 +58,9 @@ O plano falava E=70000 MPa, nu=0.33. O INP de referencia de Luiz (`FEMMeshGmsh.i
 Opt-in inalterado. Correções e contratos adicionais:
 
 - Indexacao: `create_mesh` pode reordenar vertices. CLOAD/RF/material nao usam `node_idx * 3` nem o `coords` de entrada (no lote 1 o CLOAD referencia `coords` fora de escopo — regressao corrigida). Mapas: no INP → vertice `geometry.x` (coordenadas unicas) e elemento INP → celula (conjunto de vertices).
-- CLOAD acumula no DOF localizado por `locate_dofs_geometrical` (mesmo criterio das BC). Duas linhas no mesmo no/DOF somam.
+- CLOAD acumula no DOF localizado pelas coordenadas do no (mesmo criterio das BC, agora via indice vetorizado; um `collapse` por componente). Duas linhas no mesmo no/DOF somam.
 - `*BOUNDARY`: CalculiX e `no, dof_ini, dof_fim[, valor]`. Tres colunas com valor flutuante sao ambiguas e rejeitadas no FC; valor nao nulo exige 4 colunas.
-- Matriz completa (sem BC) para residual; matriz com BC so no solve. RF = `K_full u - f_ext` apenas nos DOFs prescritos. JSON traz `sum_R_plus_F` e momentos na origem. Desequilibrio acima da tolerancia numerica de consistencia recusa sucesso.
+- Matriz com BC so no solve. RF = `K u - f_ext` (`assemble_vector` esparso da forma, apenas nos DOFs prescritos; nao ha K denso nem `A_full` unused). JSON traz `sum_R_plus_F` e momentos na origem. Desequilibrio acima da tolerancia numerica de consistencia recusa sucesso.
 - MPI: perfil FC so em serial (`size=1`). `size>1` e rejeitado (ghosts nao validados).
 - Tensor de Cauchy simetrizado `(S+S.T)/2` antes dos principais; ordem algebrica `σ1≥σ2≥σ3` com sinal; von Mises a partir desses principais.
 - `*EXPANSION` so pode ser ignorado no perfil estritamente mecanico, sem temperatura; `*TEMPERATURE` / `*INITIAL CONDITIONS` / fluxos termicos sao bloqueados.
@@ -105,3 +105,21 @@ Valdir autorizou (18:56 America/Sao_Paulo, retransmitido por Alex) parar tempora
 Inventário e checagem de atividade (18:57–18:59 America/Sao_Paulo): sem requests mngsys nos últimos 15 min; Guto-MngSys.log parado em 10/11 18:46; nenhum `ccx`; Postgres do mngsys é o servidor 18 do host em :5432 (não o `femedss-app-db-1` em :5434) e não foi parado. Os dois containers autorizados somavam **108 MiB** (94 + 14). MemAvailable = **10,40 GiB**; após uma parada a estimativa seria ≈ **10,50 GiB**, ainda ~9,5 GiB abaixo do critério.
 
 **Decisão:** abortar **sem** parar os containers e **sem** executar o solver (evitar interrupção inútil). Hash do INP conferido somente leitura: `9380e87b6073d3180b85591bcd677cd5be7d15f52a870fcc2fba6a2c3fce7e92`. Sem RF, equilíbrio, U, tensões nem comparação CCX. Gate V não aprovado. Nota: `nota-execucao-FC-auxiliar-2026-11-11.md`.
+
+## Correção de memoria (11/11/2026, apos OOM auxiliar)
+
+A rodada auxiliar E=71700 (125395 nos, 476960 C3D4, 8367 BC, 8582 CLOAD) foi OOMKilled a 18,7 GiB ~55 min depois de "Materiais aplicados", com crescimento linear de ~1,22 GiB / 6 s. B1 n=16 (140 k DOFs, poucos BC) tinha pico de só 2,8 GiB: o estouro nao era o LU.
+
+Causa: `collect_constrained_dofs` em `src/fc_assembly.py` chamava `V.sub(c).collapse()`, `locate_dofs_geometrical` e `fem.Function(Vcol)` **por cada linha *BOUNDARY**. No modelo da roda isso retém ~2 MiB por BC (Function + mapa do collapse) e chega a dezenas de GiB. `apply_cloads` tinha o mesmo locate no laço (tempo O(N·nCLOAD), memoria liberada). Alem disso, `inp_node_to_geom` era O(N²) em alocações e `get_material_for_element` fazia `elem_id in list` por elemento (O(N²) no tempo, ~48 min antes de "Materiais aplicados").
+
+Correção (resultados numericos inalterados; conferido no B1 2/4/8/16 e nos testes axiais):
+
+- Um `ComponentDofLocator` (um collapse por componente + indice de coordenadas O(N)); BC/CLOAD em O(n) lookups.
+- Um `dirichletbc` + `Function` por (componente, valor), nunca por no.
+- `inp_node_to_geom` com hash de coordenadas (mesmas tolerâncias 1e-9 / 1e-6).
+- Cache linear de material por elemento.
+- Removido o `A_full` não usado. RF continua `assemble_vector` esparso só nos DOFs prescritos.
+- `FC_MEM_PROFILE=1` imprime RSS/HWM por estágio.
+
+A roda **nao foi reexecutada** neste lote. O vazamento de BC nao e mais o limitante; o pico esperado continua sendo o LU (~10 GiB na extrapolação incremental N^1,35 a partir do B1 n=16, ou ~20 GiB com fator 2). Ver nota de execucao `nota-execucao-FC-fix-memoria-2026-11-11.md`.
+

@@ -554,24 +554,41 @@ def select_analysis(model: INPModel, step: Step) -> str:
     return "linear"
 
 
+def _material_by_element(model: INPModel) -> Dict[int, Material]:
+    """Mapa eid -> material. Primeiro elset com *SOLID SECTION vence.
+
+    Cache no modelo: `elem_id in list` por elemento era O(N²) e travava
+    malhas grandes (elsets sao listas).
+    """
+    cached = getattr(model, "_material_by_eid", None)
+    if cached is not None:
+        return cached
+    mapping: Dict[int, Material] = {}
+    section_by_elset = {sname.upper(): mname for sname, mname in model.solid_sections.items()}
+    mat_by_name = {name.upper(): mat for name, mat in model.materials.items()}
+    for elset_name, elem_ids in model.elsets.items():
+        mat_name = section_by_elset.get(elset_name.upper())
+        if not mat_name:
+            continue
+        mat = mat_by_name.get(mat_name.upper())
+        if mat is None:
+            continue
+        for eid in elem_ids:
+            if eid not in mapping:
+                mapping[int(eid)] = mat
+    model._material_by_eid = mapping
+    return mapping
+
+
 def get_material_for_element(model: INPModel, elem_id: int) -> Optional[Material]:
     """Retorna o material do elemento via elset/solid section.
 
     Se o elemento não estiver em nenhum elset com material, devolve o
     primeiro material do modelo (ou ``None`` se não houver materiais).
     """
-    for elset_name, elem_ids in model.elsets.items():
-        if elem_id in elem_ids:
-            mat_name = None
-            for sname, mname in model.solid_sections.items():
-                if sname.upper() == elset_name.upper():
-                    mat_name = mname
-                    break
-            if not mat_name:
-                continue
-            for name, mat in model.materials.items():
-                if name.upper() == mat_name.upper():
-                    return mat
+    mapping = _material_by_element(model)
+    if elem_id in mapping:
+        return mapping[elem_id]
     if model.materials:
         return next(iter(model.materials.values()))
     return None
