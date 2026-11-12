@@ -334,24 +334,181 @@ def l2_errors(coords: np.ndarray, cells: np.ndarray, uh_nodal: np.ndarray, sigma
 
 
 
-def mean_sigma_xx_sphere(coords: np.ndarray, cells: np.ndarray, sigma_cells: np.ndarray,
-                         center=SPHERE_CENTER, radius=SPHERE_RADIUS):
-    """Media volumetrica de sigma_xx nos tets cujo baricentro cai na esfera."""
+def _tet_volume_signed(verts: np.ndarray) -> float:
+    a, b, c, d = verts
+    return float(np.dot(d - a, np.cross(b - a, c - a))) / 6.0
+
+
+def _point_in_tet(p: np.ndarray, verts: np.ndarray, atol: float = 1e-12) -> bool:
+    vol = _tet_volume_signed(verts)
+    if abs(vol) <= atol:
+        return False
+    a, b, c, d = verts
+    w = np.array([
+        _tet_volume_signed(np.vstack([p, b, c, d])),
+        _tet_volume_signed(np.vstack([a, p, c, d])),
+        _tet_volume_signed(np.vstack([a, b, p, d])),
+        _tet_volume_signed(np.vstack([a, b, c, p])),
+    ], dtype=float) / vol
+    return bool(np.all(w >= -1e-10) and abs(w.sum() - 1.0) <= 1e-8)
+
+
+def _closest_point_on_triangle(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = float(np.dot(ab, ap)), float(np.dot(ac, ap))
+    if d1 <= 0.0 and d2 <= 0.0:
+        return a
+    bp = p - b
+    d3, d4 = float(np.dot(ab, bp)), float(np.dot(ac, bp))
+    if d3 >= 0.0 and d4 <= d3:
+        return b
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3) if (d1 - d3) != 0 else 0.0
+        return a + v * ab
+    cp = p - c
+    d5, d6 = float(np.dot(ab, cp)), float(np.dot(ac, cp))
+    if d6 >= 0.0 and d5 <= d6:
+        return c
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6) if (d2 - d6) != 0 else 0.0
+        return a + w * ac
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        den = (d4 - d3) + (d5 - d6)
+        w = (d4 - d3) / den if den != 0 else 0.0
+        return b + w * (c - b)
+    den = va + vb + vc
+    v = vb / den if den != 0 else 0.0
+    w = vc / den if den != 0 else 0.0
+    return a + ab * v + ac * w
+
+
+def tet_distance_to_point(verts: np.ndarray, point: np.ndarray) -> float:
+    """Distancia minima do ponto ao tetraedro (0 se o ponto esta dentro)."""
+    p = np.asarray(point, dtype=float)
+    v = np.asarray(verts, dtype=float)
+    if _point_in_tet(p, v):
+        return 0.0
+    faces = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
+    d2 = min(np.sum((_closest_point_on_triangle(p, v[i], v[j], v[k]) - p) ** 2) for i, j, k in faces)
+    return float(math.sqrt(d2))
+
+
+def _mid_subdivide_tet(verts: np.ndarray):
+    """Subdivisao pelos pontos medios em 8 tets (volumes somam o pai)."""
+    v0, v1, v2, v3 = verts
+    m01 = 0.5 * (v0 + v1)
+    m02 = 0.5 * (v0 + v2)
+    m03 = 0.5 * (v0 + v3)
+    m12 = 0.5 * (v1 + v2)
+    m13 = 0.5 * (v1 + v3)
+    m23 = 0.5 * (v2 + v3)
+    children = (
+        (v0, m01, m02, m03),
+        (v1, m12, m01, m13),
+        (v2, m02, m12, m23),
+        (v3, m03, m13, m23),
+        (m01, m02, m03, m13),
+        (m01, m12, m02, m13),
+        (m12, m02, m23, m13),
+        (m02, m03, m23, m13),
+    )
+    return [np.vstack(ch) for ch in children]
+
+
+def tet_sphere_intersection_volume(verts: np.ndarray, center, radius: float,
+                                   max_depth: int = 5, vol_tol: float = 1e-12) -> float:
+    """Volume de tet ∩ esfera, por classificacao exata + subdivisao nos tets de fronteira."""
     c = np.asarray(center, dtype=float)
-    bary = coords[cells].mean(axis=1)
-    dist = np.linalg.norm(bary - c, axis=1)
+    r = float(radius)
+
+    def rec(vs, depth):
+        vs = np.asarray(vs, dtype=float)
+        vol = abs(_tet_volume_signed(vs))
+        if vol <= vol_tol:
+            return 0.0
+        dvert = np.linalg.norm(vs - c, axis=1)
+        if dvert.max() <= r:
+            return vol
+        if tet_distance_to_point(vs, c) >= r:
+            return 0.0
+        edges = (
+            np.linalg.norm(vs[1] - vs[0]),
+            np.linalg.norm(vs[2] - vs[0]),
+            np.linalg.norm(vs[3] - vs[0]),
+            np.linalg.norm(vs[2] - vs[1]),
+            np.linalg.norm(vs[3] - vs[1]),
+            np.linalg.norm(vs[3] - vs[2]),
+        )
+        hmax = max(edges)
+        if depth <= 0 or hmax <= 0.05 * r:
+            bary = vs.mean(axis=0)
+            inside = int(np.count_nonzero(dvert <= r)) + (1 if np.linalg.norm(bary - c) <= r else 0)
+            return vol * (inside / 5.0)
+        return sum(rec(ch, depth - 1) for ch in _mid_subdivide_tet(vs))
+
+    return rec(verts, max_depth)
+
+
+def mean_sigma_xx_sphere(coords: np.ndarray, cells: np.ndarray, sigma_cells: np.ndarray,
+                         center=SPHERE_CENTER, radius=SPHERE_RADIUS, method: str = "barycenter"):
+    """Media volumetrica de sigma_xx na esfera monitor.
+
+    method='barycenter': tets cujo baricentro cai na esfera (lote 3, volume do
+    conjunto muda com h). method='geometric': volume da intersecao tet ∩ esfera
+    (subdivisao nos tets de fronteira); sigma DG0 constante no tet.
+    """
+    c = np.asarray(center, dtype=float)
     vols = np.abs(tet_volumes(coords, cells))
-    mask = dist <= radius
-    if not np.any(mask):
-        return {"n_tets": 0, "mean_sigma_xx": float("nan"), "volume": 0.0, "exact": SIGMA_SPHERE_EXACT, "rel_err": float("nan")}
-    v = vols[mask]
-    sxx = sigma_cells[mask, 0, 0]
+    sxx = np.asarray(sigma_cells)[:, 0, 0]
+    if method == "barycenter":
+        bary = coords[cells].mean(axis=1)
+        dist = np.linalg.norm(bary - c, axis=1)
+        mask = dist <= radius
+        if not np.any(mask):
+            return {"n_tets": 0, "mean_sigma_xx": float("nan"), "volume": 0.0,
+                    "exact": SIGMA_SPHERE_EXACT, "rel_err": float("nan"),
+                    "method": method}
+        v = vols[mask]
+        mean = float(np.sum(sxx[mask] * v) / np.sum(v))
+        return {
+            "n_tets": int(np.count_nonzero(mask)),
+            "mean_sigma_xx": mean,
+            "volume": float(np.sum(v)),
+            "exact": SIGMA_SPHERE_EXACT,
+            "rel_err": float(mean / SIGMA_SPHERE_EXACT - 1.0),
+            "method": method,
+        }
+    if method != "geometric":
+        raise ValueError("method deve ser barycenter ou geometric, nao {0}".format(method))
+    # primeiro descarta tets claramente fora (todas as arestas e a dist.min)
+    bary = coords[cells].mean(axis=1)
+    # raio de circunscricao por tet <= max dist vertices-baricentro
+    verts = coords[cells]
+    r_bound = np.linalg.norm(verts - bary[:, None, :], axis=2).max(axis=1)
+    dist_b = np.linalg.norm(bary - c, axis=1)
+    maybe = dist_b - r_bound <= radius
+    w = np.zeros(len(cells), dtype=float)
+    for i in np.nonzero(maybe)[0]:
+        w[i] = tet_sphere_intersection_volume(verts[i], c, radius)
+    n = int(np.count_nonzero(w > 0.0))
+    vol = float(np.sum(w))
+    if vol <= 0.0:
+        return {"n_tets": 0, "mean_sigma_xx": float("nan"), "volume": 0.0,
+                "exact": SIGMA_SPHERE_EXACT, "rel_err": float("nan"),
+                "method": method, "n_tets_tested": int(np.count_nonzero(maybe))}
+    mean = float(np.sum(sxx * w) / vol)
     return {
-        "n_tets": int(np.count_nonzero(mask)),
-        "mean_sigma_xx": float(np.sum(sxx * v) / np.sum(v)),
-        "volume": float(np.sum(v)),
+        "n_tets": n,
+        "mean_sigma_xx": mean,
+        "volume": vol,
         "exact": SIGMA_SPHERE_EXACT,
-        "rel_err": float(np.sum(sxx * v) / np.sum(v) / SIGMA_SPHERE_EXACT - 1.0),
+        "rel_err": float(mean / SIGMA_SPHERE_EXACT - 1.0),
+        "method": method,
+        "n_tets_tested": int(np.count_nonzero(maybe)),
+        "volume_bary_ref": float(np.sum(vols[dist_b <= radius])) if np.any(dist_b <= radius) else 0.0,
     }
 
 
@@ -364,7 +521,8 @@ def monitors(coords, cells, uh_nodal, sigma_cells, loads, reactions=None):
     phiL = face_rotation_z(coords, uh_nodal, L)
     phi_rel = phiL - phi0
     l2 = l2_errors(coords, cells, uh_nodal, sigma_cells)
-    sph = mean_sigma_xx_sphere(coords, cells, sigma_cells)
+    sph = mean_sigma_xx_sphere(coords, cells, sigma_cells, method="geometric")
+    sph_bary = mean_sigma_xx_sphere(coords, cells, sigma_cells, method="barycenter")
     # energia 1/2 f·u nas cargas aplicadas
     energy = 0.0
     for nid, f in loads.items():
@@ -386,6 +544,7 @@ def monitors(coords, cells, uh_nodal, sigma_cells, loads, reactions=None):
         "applied_F": F.tolist(),
         "applied_M_origin": Mv.tolist(),
         "sphere": sph,
+        "sphere_barycenter": sph_bary,
         "l2": l2,
         "reactions": reactions,
         "constants": {

@@ -87,7 +87,9 @@ def evaluate(domain, uh, sigma_cells, coords_inp, loads_inp, extra):
     uy = float(uarr[im, 1])
     phi_rel = face_rotation_z(coords, uarr, L) - face_rotation_z(coords, uarr, 0.0)
     l2 = l2_errors(coords, cells, uarr, sigma_cells)
-    sph = mean_sigma_xx_sphere(coords, cells, sigma_cells)
+    sph_bary = mean_sigma_xx_sphere(coords, cells, sigma_cells, method="barycenter")
+    sph_geo = mean_sigma_xx_sphere(coords, cells, sigma_cells, method="geometric")
+    sph = sph_geo
     energy = 0.0
     for gid, f in loads_g.items():
         energy += 0.5 * float(np.dot(f, uarr[gid]))
@@ -112,6 +114,8 @@ def evaluate(domain, uh, sigma_cells, coords_inp, loads_inp, extra):
         "energy_le_exact": energy <= U_EXACT_ENERGY * (1.0 + 1e-6),
         "l2": l2,
         "sphere": sph,
+        "sphere_geometric": sph_geo,
+        "sphere_barycenter": sph_bary,
         "reactions": {
             "sum_R_plus_F": sum_rf,
             "moment_R_plus_F_origin": mom,
@@ -127,7 +131,7 @@ def evaluate(domain, uh, sigma_cells, coords_inp, loads_inp, extra):
     }
 
 
-def run_level(n_thick: int, work: str, debug: int = 0):
+def run_level(n_thick: int, work: str, debug: int = 0, solver: str = "lu", rtol: float = 1e-10):
     from run_from_inp import run_from_inp
 
     pack = write_level_inp(work, n_thick)
@@ -135,13 +139,11 @@ def run_level(n_thick: int, work: str, debug: int = 0):
     os.makedirs(out, exist_ok=True)
     rss0 = peak_rss_bytes()
     t0 = time.perf_counter()
-    results = run_from_inp(
-        pack["inp"],
-        output_dir=out,
-        debug=debug,
-        profile="fc",
-        units="mm-N-MPa-t-s",
-    )
+    kw = dict(output_dir=out, debug=debug, profile="fc", units="mm-N-MPa-t-s")
+    if solver and solver != "lu":
+        kw["solver"] = solver
+        kw["rtol"] = rtol
+    results = run_from_inp(pack["inp"], **kw)
     elapsed = time.perf_counter() - t0
     rss1 = peak_rss_bytes()
     uh, extra = results[0]
@@ -161,6 +163,7 @@ def run_level(n_thick: int, work: str, debug: int = 0):
     ev["output_dir"] = out
     ev["inp"] = pack["inp"]
     ev["mesh_info"] = pack["info"]
+    ev["solver"] = extra.get("solver_info") or extra.get("solver")
     return ev
 
 

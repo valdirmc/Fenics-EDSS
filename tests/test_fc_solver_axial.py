@@ -295,7 +295,9 @@ def test_axial_cg_gamg_vs_lu(tmp_path):
     assert info.get("type") == "cg-gamg"
     assert int(info.get("converged_reason", 0)) > 0
     assert info.get("true_residual_rel") is not None
-    # Nao inventa tolerancia de aceite; so garante que nao divergiu e relata a diferenca.
+    assert info["true_residual_rel"] <= 1e-10
+    assert info.get("true_residual_meets_rtol") is True
+    # Nao inventa tolerancia de aceite para U/S vs LU; so relata a diferenca.
     print("AXIAL CG vs LU: max|dU|={0:.6e} max|dS|={1:.6e} its={2} ||r||/||b||={3:.6e}".format(
         du, ds, info.get("iterations"), info.get("true_residual_rel")))
     # consistencia grosseira: o prisma e minusculo; se CG funcionou, dU nao pode ser da ordem da solucao

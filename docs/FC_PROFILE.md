@@ -141,3 +141,34 @@ Testes do perfil FC no container `edss/fenicsx:dev`: 60 passaram. Testes de host
 Autorizacao de Valdir 11/11 21:10 America/Sao_Paulo, retransmitida por Alex: tentar o solver iterativo, maquina liberada exceto o grok-bot. Job detached `fenics-fc-auxiliar-e71700-cggamg` (cid `3653ba2082d2…`), imagem local `edss/fenicsx:dev`, INP copia (original intacto, SHA-256 `9380e87b6073d3180b85591bcd677cd5be7d15f52a870fcc2fba6a2c3fce7e92` antes e depois). Teto `--memory`=`--memory-swap`=19,592 GiB (MemAvailable 23,592 GiB − 4 GiB), 4 CPUs. Sem push, sem Avell, sem contato com outros containers.
 
 O solve CG+GAMG convergiu (200 its, `CONVERGED_RTOL`, `||r||/||b||` verdadeiro = 2,326e-10; `solve_exit=0`, pico cgroup 1,479 GiB, ~41 s ate o manifesto). O pos-processamento *dentro* do container falhou (exit 1): a imagem nao tem `meshio`/`vtk`. O pos-processamento foi refeito no host sobre os VTU/JSON ja gravados (leitor ASCII VTU 2.2; glob do stem do PVD foi corrigido para nao pegar `_RF`/`_cell` como U). **Rotulo AUXILIAR / nao definitivo / nao validado. Gate V nao aprovado.** Tolerancias de Luiz (C2/C3/C4/energia) sao propostas, nao aceite. Detalhe e comparacao CCX (so U nodal e totais do `.dat`): `nota-execucao-FC-auxiliar-iterativo-2026-11-11.md`.
+
+## Noite 11/11/2026 — residual verdadeiro, esfera geometrica, calibracao CCX B1
+
+Criterio oficial do CG+GAMG: **TRUE** `||Au−b||/||b|| ≤ rtol` (autorizado 1e-10), verificado com `A.mult` apos o solve. O rnorm UNPRECONDITIONED recursivo do CG pode ficar abaixo do rtol enquanto o residual verdadeiro ainda nao (roda auxiliar, primeira run: KSP ~8,76e-11 vs verdadeiro 2,326e-10). Nao ha `setConvergenceTest` (uma tentativa anterior nao parava). O KSP usa rtol interno `min(rtol*0,1, 1e-12)`; se o residual verdadeiro ainda exceder o rtol, o solver reinicia a partir do `u` atual (residual replacement, r0 verdadeiro, ciclos de ate 100 its, no maximo 40). Se ao final `rel > rtol` ou o KSP divergir, a run termina com `RuntimeError` / exit ≠ 0, **sem fallback para LU**.
+
+A imagem compartilhada `edss/fenicsx:dev` **nao foi alterada** (meshio/VTU nao entraram nela). O pos-processamento da roda usa o script no host (leitor ASCII VTU 2.2), bind-mount em `/scripts/postprocess.py`.
+
+### Roda auxiliar CG+GAMG com criterio verdadeiro (21:42:47–21:44:37 America/Sao_Paulo)
+
+Evidencia da run anterior (200 its, residual verdadeiro 2,326e-10 > 1e-10) preservada em `_run_iterativo/`. Run nova em `_run_iterativo_true_rtol/` (tentativas 1–2 arquivadas no mesmo diretorio). Job `fenics-fc-auxiliar-e71700-cggamg-tr`, teto 19,543 GiB, 4 CPUs, INP copia com SHA-256 `9380e87b6073d3180b85591bcd677cd5be7d15f52a870fcc2fba6a2c3fce7e92` antes e depois. **AUXILIAR, nao definitivo, nao validado. Gate V nao aprovado.**
+
+MEASURED: `solve_exit=0`, 668 its, 11 residual replacements, `true ||r||/||b|| = 9,578e-11 ≤ 1e-10`, `true_residual_meets_rtol=true`, pico cgroup 1,485 GiB (1594101760 B) sob o teto de 19,543 GiB. max|U|=0,39003889 mm no no 3233. RFy=4999,927425905 N; Σ(R+F) ~ 1e-9 N. C4 proposta vs .dat Luiz: max‖du‖=7,02e-7 mm, 0 violacoes; energia rel 4,32e-8. Extremos S1/S2/S3/VM globais **nao** caem nos 183 elementos com q<0,1 (os valores fora dos pobres coincidem com o global). Detalhe na nota `nota-execucao-FC-noite-2026-11-11.md`.
+
+### Esfera B1 (recorte geometrico)
+
+O monitor da esfera (r=2 mm em (100, 7, 0)) passou a reportar volume tet ∩ esfera (subdivisao mid-edge, profundidade 5) alem do criterio por baricentro. Volumes geometricos aproximam 4/3 π R³ ≈ 33,5103 mm³. Erros de σ_xx medio (CG+GAMG, residual verdadeiro ≤ 1e-10), MEASURED:
+
+- n=4: geo rel_err=−0,18913 (vol=33,4924, 12 tets); bary=−0,14701 (vol=41,6667)
+- n=8: geo rel_err=−0,05907 (vol=33,5000, 38 tets); bary=−0,08874 (vol=41,6667)
+- n=16: geo rel_err=−0,01620 (vol=33,5075, 248 tets); bary=−0,01628 (vol=33,8542)
+
+Em n=4/8 o conjunto por baricentro tinha volume 41,67 mm³ (nao e uma bola geometrica). Propostas C7/C8, nao gate.
+
+### Calibracao CCX B1 (C4–C6)
+
+INP B1 n=8 e n=16 rodados no CCX 2.23 em container **temporario** `ubuntu-calculix:latest` (o container vivo `ubuntu-calculix` nao foi parado nem alterado). Decks com notacao cientifica longa (16 digitos) falharam (`*ERROR reading *NODE`, exit 201); a copia CCX foi compactada (E maiusculo / decimais curtos, linhas ≪ 72). `*EL PRINT` no ponto de integracao (C3D4: 1 IP) vs Cauchy DG0.
+
+MEASURED, propostas, nao aceite. Tolerancia numerica C5/C6 de Luiz **nao encontrada** nos docs locais/Drive disponiveis; nao foi inventada.
+
+- n=8: C4 proposta 0 violacoes, max‖du‖=5,049e-7 mm (u_ref=2,011 mm); max|dS|=5,234e-6 MPa (s_ref=77,636 MPa), 6561 nos / 30720 elems
+- n=16: C4 proposta 0 violacoes, max‖du‖=5,364e-7 mm (u_ref=2,116 mm); max|dS|=4,379e-5 MPa (s_ref=77,542 MPa), 46529 nos / 245760 elems

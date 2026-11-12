@@ -158,6 +158,40 @@ def true_residual(A, uvec, bvec) -> Tuple[float, float, float]:
     return rn, bn, rel
 
 
+
+def _true_residual_convergence_test(ksp, rtol: float, max_it: int):
+    """Criterio oficial: ||b-Au||/||b|| via ksp.buildResidual (nao o rnorm recursivo)."""
+    from petsc4py import PETSc
+
+    work: Dict[str, Any] = {"r": None, "bn": None}
+
+    def _conv(ks, it, rnorm):
+        bvec = ks.getRhs()
+        if work["r"] is None:
+            work["r"] = bvec.duplicate()
+            work["bn"] = float(bvec.norm())
+        rvec = work["r"]
+        try:
+            ks.buildResidual(rvec)
+            rn = float(rvec.norm())
+        except Exception:
+            rn = float(rnorm)
+        bn = float(work["bn"] or 0.0)
+        rel = rn / bn if bn > 0.0 else rn
+        if not np.isfinite(rn) or not np.isfinite(rel):
+            return PETSc.KSP.ConvergedReason.DIVERGED_NANORINF
+        if bn > 0.0 and rn > 1.0e5 * bn:
+            return PETSc.KSP.ConvergedReason.DIVERGED_DTOL
+        if rel <= rtol:
+            return PETSc.KSP.ConvergedReason.CONVERGED_RTOL
+        if int(it) >= int(max_it):
+            return PETSc.KSP.ConvergedReason.DIVERGED_ITS
+        return PETSc.KSP.ConvergedReason.CONVERGED_ITERATING
+
+    ksp.setConvergenceTest(_conv)
+    return work
+
+
 def _configure_cg_gamg(ksp, A, V, rtol: float, max_it: int) -> None:
     from petsc4py import PETSc
 
@@ -165,7 +199,10 @@ def _configure_cg_gamg(ksp, A, V, rtol: float, max_it: int) -> None:
     ksp.setOperators(A)
     ksp.setType(PETSc.KSP.Type.CG)
     ksp.setTolerances(rtol=rtol, atol=0.0, divtol=1e5, max_it=int(max_it))
-    # residual verdadeira ||b-Ax||, nao a precondicionada
+    # NormType UNPRECONDITIONED: rnorm do KSP e ||b-Ax|| recursivo do CG,
+    # que pode derivar do residual verdadeiro (matvec) em malhas mal
+    # condicionadas. O criterio oficial usa ksp.buildResidual + checagem
+    # pos-solve com A.mult.
     try:
         ksp.setNormType(PETSc.KSP.NormType.UNPRECONDITIONED)
     except Exception:
@@ -201,8 +238,7 @@ def solve_linear(A, b, uh, V, *, solver: str = SOLVER_LU, rtol: float = DEFAULT_
     ns_refs = None  # retido ate o fim do solve (near-nullspace Vecs)
 
     def _monitor(ks, it, rnorm):
-        rec = {"iteration": int(it), "rnorm": float(rnorm)}
-        history.append(rec)
+        history.append({"iteration": int(it), "rnorm": float(rnorm)})
         if debug or it == 0 or it % 25 == 0:
             print("KSP it={0} rnorm={1:.6e}".format(it, rnorm), flush=True)
 
@@ -215,12 +251,61 @@ def solve_linear(A, b, uh, V, *, solver: str = SOLVER_LU, rtol: float = DEFAULT_
         except Exception:
             pass
     else:
-        ns_refs = _configure_cg_gamg(ksp, A, V, rtol, max_it)
+        # rtol interno mais apertado no KSP (rnorm recursivo). O criterio
+        # oficial e ||Au-b||/||b|| <= rtol, via buildResidual + A.mult.
+        internal_rtol = min(rtol * 0.1, 1e-12)
+        ns_refs = _configure_cg_gamg(ksp, A, V, internal_rtol, max_it)
         ksp.setMonitor(_monitor)
+        # Nao usa setConvergenceTest: um teste com residual mal avaliado
+        # no callback ja falhou (nao parava). O KSP para no rnorm recursivo
+        # (internal_rtol); se ||Au-b||/||b|| ainda > rtol, reinicia com o
+        # u atual (residual replacement, r0 verdadeiro). Ciclos curtos
+        # limitam a deriva do residual recursivo.
 
     uvec = uh.x.petsc_vec
+    total_its = 0
+    n_restarts = 0
+    max_restarts = 40
+    cycle_max_it = 100
+    reason = 0
     try:
-        ksp.solve(b, uvec)
+        if kind == SOLVER_CG_GAMG:
+            ksp.setInitialGuessNonzero(False)
+            while True:
+                remaining = int(max_it) - total_its
+                if remaining <= 0:
+                    break
+                ksp.setTolerances(
+                    rtol=internal_rtol, atol=0.0, divtol=1e5,
+                    max_it=min(cycle_max_it, remaining),
+                )
+                ksp.solve(b, uvec)
+                uh.x.scatter_forward()
+                its_step = int(ksp.getIterationNumber())
+                total_its += its_step
+                reason = int(ksp.getConvergedReason())
+                rn, bn, rel = true_residual(A, uvec, b)
+                if rel <= rtol and reason > 0:
+                    break
+                if reason <= 0 and reason != -3:  # -3 = DIVERGED_ITS
+                    break
+                if total_its >= int(max_it) or n_restarts >= max_restarts:
+                    break
+                # rnorm recursivo do CG derivou: reinicia com u atual e residual verdadeiro
+                n_restarts += 1
+                print(
+                    "CG+GAMG residual replacement {0}: its={1} true ||r||/||b||={2:.6e} (rtol={3:g})".format(
+                        n_restarts, total_its, rel, rtol
+                    ),
+                    flush=True,
+                )
+                ksp.setInitialGuessNonzero(True)
+        else:
+            ksp.solve(b, uvec)
+            uh.x.scatter_forward()
+            reason = int(ksp.getConvergedReason())
+            total_its = int(ksp.getIterationNumber())
+            rn, bn, rel = true_residual(A, uvec, b)
     except Exception as exc:
         info = {
             "type": kind,
@@ -235,10 +320,7 @@ def solve_linear(A, b, uh, V, *, solver: str = SOLVER_LU, rtol: float = DEFAULT_
         err.solver_info = info
         raise err from exc
 
-    uh.x.scatter_forward()
-    reason = int(ksp.getConvergedReason())
-    its = int(ksp.getIterationNumber())
-    rn, bn, rel = true_residual(A, uvec, b)
+    its = total_its
     rname = reason_name(reason)
     info = {
         "type": kind,
@@ -263,10 +345,20 @@ def solve_linear(A, b, uh, V, *, solver: str = SOLVER_LU, rtol: float = DEFAULT_
             ),
             flush=True,
         )
-    if kind == SOLVER_CG_GAMG and reason <= 0:
+    info["stopping_criterion"] = (
+        "true ||Au-b||/||b|| <= rtol" if kind == SOLVER_CG_GAMG else "lu-direct"
+    )
+    if kind == SOLVER_CG_GAMG:
+        info["ksp_internal_rtol"] = min(rtol * 0.1, 1e-12)
+        info["rtol_requested"] = rtol
+        info["residual_replacements"] = n_restarts
+        info["cycle_max_it"] = cycle_max_it
+    info["true_residual_meets_rtol"] = bool(rel <= rtol) if kind == SOLVER_CG_GAMG else None
+    if kind == SOLVER_CG_GAMG and (reason <= 0 or rel > rtol):
         err = RuntimeError(
-            "CG+GAMG nao convergiu (reason={0} {1}, its={2}/{3}, "
-            "||r||/||b||={4:.6e}, rtol={5:g}). Sem fallback para LU.".format(
+            "CG+GAMG nao atingiu residual verdadeiro ||Au-b||/||b|| <= rtol "
+            "(reason={0} {1}, its={2}/{3}, ||r||/||b||={4:.6e}, rtol={5:g}). "
+            "Sem fallback para LU.".format(
                 reason, rname, its, max_it, rel, rtol
             )
         )

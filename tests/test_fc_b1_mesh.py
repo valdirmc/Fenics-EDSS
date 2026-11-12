@@ -54,3 +54,28 @@ def test_b1_niveis_homologos():
         assert meta["n_dofs"] == meta["n_nodes"] * 3
     for a, b in zip(hs, hs[1:]):
         assert a / b == pytest.approx(2.0)
+
+
+def test_tet_sphere_intersection_volume():
+    import numpy as np
+    from fc_b1 import tet_sphere_intersection_volume, _mid_subdivide_tet, _tet_volume_signed
+    # tet unitario de volume 1/6
+    verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    vol = abs(_tet_volume_signed(verts))
+    kids = _mid_subdivide_tet(verts)
+    assert abs(sum(abs(_tet_volume_signed(k)) for k in kids) - vol) <= 1e-12 * max(vol, 1.0)
+    # esfera que contem o tet: volume = vol do tet
+    vin = tet_sphere_intersection_volume(verts, (0.2, 0.2, 0.2), 10.0)
+    assert abs(vin - vol) <= 1e-12
+    # esfera disjunta
+    vout = tet_sphere_intersection_volume(verts, (10.0, 10.0, 10.0), 0.5)
+    assert vout == 0.0
+    # esfera no interior: volume da bola (4/3 pi r^3) se a bola cabe no tet
+    # (r pequeno no baricentro 0.25,0.25,0.25 — distancia as faces = 0.25/sqrt(3) ~ 0.14)
+    r = 0.05
+    c = (0.15, 0.15, 0.15)
+    vball = tet_sphere_intersection_volume(verts, c, r, max_depth=7)
+    exact = 4.0 / 3.0 * np.pi * r ** 3
+    # folha residual; tolerar 5 % nesta bola pequena totalmente interior
+    assert vball > 0.0
+    assert abs(vball - exact) / exact <= 0.05
