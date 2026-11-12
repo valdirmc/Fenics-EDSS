@@ -117,7 +117,7 @@ def _prism_inp(*, with_cload=True, split_cload=False, prescribed_top=False, with
     return "\n".join(lines) + "\n"
 
 
-def _run(tmp_path, text, name="prism.inp", parse_only=False):
+def _run(tmp_path, text, name="prism.inp", parse_only=False, solver="lu", rtol=1e-10):
     inp = tmp_path / name
     inp.write_text(text, encoding="utf-8")
     out = tmp_path / ("out_" + name)
@@ -129,6 +129,8 @@ def _run(tmp_path, text, name="prism.inp", parse_only=False):
         profile="fc",
         units="mm-N-MPa-t-s",
         parse_only=parse_only,
+        solver=solver,
+        rtol=rtol,
     ), out
 
 
@@ -272,3 +274,30 @@ def test_cli_singular_exit_e_status_failed(tmp_path):
     # manifesto antigo pode permanecer, mas status atual e failed
     man = json.loads((out / "run_manifest.json").read_text())
     assert man.get("run_id") == "old" or man.get("status") != "ok"
+
+
+
+def test_axial_cg_gamg_vs_lu(tmp_path):
+    """CG+GAMG no prisma axial deve ficar proximo do LU; relata o max |dU| e |dS|."""
+    text = _prism_inp(split_cload=True)
+    results_lu, out_lu = _run(tmp_path, text, "axial_lu.inp", solver="lu")
+    results_cg, out_cg = _run(tmp_path, text, "axial_cg.inp", solver="cg-gamg", rtol=1e-10)
+    _res_lu, extra_lu = results_lu[0]
+    _res_cg, extra_cg = results_cg[0]
+    import numpy as np
+    u_lu = np.asarray(_res_lu.x.array, dtype=float)
+    u_cg = np.asarray(_res_cg.x.array, dtype=float)
+    du = float(np.max(np.abs(u_cg - u_lu)))
+    s_lu = np.asarray(extra_lu["stress_cells"], dtype=float)
+    s_cg = np.asarray(extra_cg["stress_cells"], dtype=float)
+    ds = float(np.max(np.abs(s_cg - s_lu)))
+    info = extra_cg.get("solver_info") or {}
+    assert info.get("type") == "cg-gamg"
+    assert int(info.get("converged_reason", 0)) > 0
+    assert info.get("true_residual_rel") is not None
+    # Nao inventa tolerancia de aceite; so garante que nao divergiu e relata a diferenca.
+    print("AXIAL CG vs LU: max|dU|={0:.6e} max|dS|={1:.6e} its={2} ||r||/||b||={3:.6e}".format(
+        du, ds, info.get("iterations"), info.get("true_residual_rel")))
+    # consistencia grosseira: o prisma e minusculo; se CG funcionou, dU nao pode ser da ordem da solucao
+    u_scale = float(np.max(np.abs(u_lu))) or 1.0
+    assert du / u_scale < 1e-3

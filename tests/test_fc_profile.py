@@ -261,3 +261,16 @@ def test_t0_hidrostatico_von_mises():
         assert pr[0, 0] == pytest.approx(pval)
         assert pr[0, 2] == pytest.approx(pval)
         assert vm[0] <= 1e-12 * abs(pval)
+
+
+def test_cli_solver_cg_gamg():
+    args = parse_run_args(["caso.inp", "--profile", "fc", "--units", "mm-N-MPa-t-s",
+                           "--solver", "cg-gamg", "--rtol", "1e-10"])
+    assert args.solver == "cg-gamg"
+    assert args.rtol == 1e-10
+    default = parse_run_args(["caso.inp", "--profile", "fc", "--units", "mm-N-MPa-t-s"])
+    assert default.solver == "lu"
+    with pytest.raises(ValueError, match="solver desconhecido"):
+        parse_run_args(["caso.inp", "--solver", "jacobi"])
+    with pytest.raises(ValueError, match="rtol"):
+        parse_run_args(["caso.inp", "--solver", "cg-gamg", "--rtol", "1e-8"])

@@ -49,6 +49,8 @@ from fc_assembly import (
     require_serial_fc,
     residual_on_constrained,
 )
+from fc_solver import SOLVER_LU, solve_linear
+from job_io import normalize_rtol, normalize_solver
 
 
 def build_mesh_from_inp(model, debug=0):
@@ -92,9 +94,12 @@ def build_mesh_from_inp(model, debug=0):
     return domain, node_map
 
 
-def run_linear_static_step(model, step, output_base: str, debug: int = 0, profile: str = None):
+def run_linear_static_step(model, step, output_base: str, debug: int = 0, profile: str = None,
+                           solver: str = "lu", rtol: float = 1e-10):
     """Executa um step de estatica linear com multiplos materiais."""
     profile_fc = (profile or "").strip().lower() == "fc"
+    solver = normalize_solver(solver)
+    rtol = normalize_rtol(rtol, solver)
     require_serial_fc(MPI.COMM_WORLD, profile_fc)
     t0 = time.perf_counter()
     stages = [] if mem_profile_enabled() else None
@@ -212,36 +217,28 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
     b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
     set_bc(b, bcs)
 
-    solver = PETSc.KSP().create(domain.comm)
-    solver.setOperators(A)
-    solver.setType("preonly")
-    solver.getPC().setType("lu")
-    try:
-        solver.setErrorIfNotConverged(True)
-    except Exception:
-        pass
     uh = fem.Function(V)
-    try:
-        solver.solve(b, uh.x.petsc_vec)
-    except Exception as exc:
-        raise RuntimeError(
-            "Solver PETSc falhou (possivel matriz singular ou nao convergencia): {0}".format(exc)
-        ) from exc
-    uh.x.scatter_forward()
-    check_solution_finite(uh, solver)
-    log_fc_stage("solve_lu", t0, stages)
+    solver_info = solve_linear(
+        A, b, uh, V, solver=solver, rtol=rtol, debug=debug,
+    )
+    log_fc_stage("solve", t0, stages)
     uh.name = "displacement"
 
     write_vtk_function(domain.comm, uh, output_base, debug=debug)
     honored = ["U"]
     artifacts = [{"path": output_base + ".pvd", "field": "U", "location": "nodal-CG1"}]
-    extra = {"honored": honored, "artifacts": artifacts, "reactions": None, "applied": applied}
+    extra = {
+        "honored": honored, "artifacts": artifacts, "reactions": None,
+        "applied": applied, "solver_info": solver_info,
+    }
 
     if profile_fc:
-        extra = _write_fc_linear_fields(
+        fields = _write_fc_linear_fields(
             domain, uh, v, sigma, epsilon, f_ext, a_form, model, output_base, debug,
             constrained_rows=constrained_rows, applied=applied,
         )
+        fields["solver_info"] = solver_info
+        extra = fields
         log_fc_stage("fc_fields_rf", t0, stages)
         _check_fc_force_balance(extra)
 
@@ -253,7 +250,7 @@ def run_linear_static_step(model, step, output_base: str, debug: int = 0, profil
 
 def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0,
                  profile: str = None, units: str = None, parse_only: bool = False,
-                 run_id: str = None):
+                 run_id: str = None, solver: str = "lu", rtol: float = 1e-10):
     """Executa cada step e grava a saida somente em output_dir."""
     if not os.path.exists(inp_path):
         print(f"ERRO: arquivo nao encontrado: {inp_path}")
@@ -273,6 +270,8 @@ def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0,
             "status": "started",
             "run_id": run_id,
             "solver_run": not parse_only,
+            "solver": normalize_solver(solver),
+            "rtol": normalize_rtol(rtol, normalize_solver(solver)),
             "note": "run em andamento; manifesto antigo neste diretorio nao e sucesso desta run",
         })
 
@@ -326,7 +325,8 @@ def run_from_inp(inp_path: str, output_dir: str = "/app/output", debug: int = 0,
             extra = {"honored": [], "artifacts": [], "reactions": None}
         else:
             result, extra = run_linear_static_step(
-                model, step, output_base, debug, profile=profile
+                model, step, output_base, debug, profile=profile,
+                solver=solver, rtol=rtol,
             )
         results.append((result, extra))
 
@@ -553,10 +553,12 @@ def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug, ru
     honored = []
     artifacts = []
     reactions = None
+    solver_info = None
     for _res, extra in results:
         honored = list(extra.get("honored") or [])
         artifacts.extend(extra.get("artifacts") or [])
         reactions = extra.get("reactions") or reactions
+        solver_info = extra.get("solver_info") or solver_info
 
     requested = required_output_fields(rec) if rec else ["U", "S", "PRINCIPAL", "VON_MISES"]
     check_honored_outputs(requested, honored)
@@ -595,6 +597,7 @@ def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug, ru
         },
         "static_increments": rec.static_increments if rec else None,
         "reactions": reactions,
+        "solver": solver_info,
         "solver_versions": _stack_versions(),
         "image": {
             "name_requested": os.environ.get("FENICS_IMAGE", "edss/fenicsx:dev"),
@@ -616,12 +619,15 @@ def _finalize_fc_run(model, output_dir, inp_path, units_norm, results, debug, ru
     manifest_path = write_run_manifest(output_dir, payload)
     required = [os.path.basename(a["path"]) for a in artifacts if a.get("path")]
     verify_run_artifacts(manifest_path, required)
-    write_run_status(output_dir, {
+    status_body = {
         "status": "ok",
         "run_id": run_id,
         "solver_run": True,
         "manifest": manifest_path,
-    })
+    }
+    if solver_info:
+        status_body["solver"] = solver_info
+    write_run_status(output_dir, status_body)
     if debug:
         print("Manifesto:", manifest_path)
 
@@ -648,6 +654,8 @@ if __name__ == "__main__":
             units=args.units,
             parse_only=args.parse_only,
             run_id=run_id,
+            solver=args.solver,
+            rtol=args.rtol,
         )
     except FCProfileError as exc:
         print("ERRO FC: {0}".format(exc))
@@ -668,14 +676,19 @@ if __name__ == "__main__":
         print("ERRO: {0}".format(exc))
         if profile_fc:
             try:
-                write_run_status(prepare_output_dir(output_dir), {
+                failed = {
                     "status": "failed",
                     "run_id": run_id,
                     "solver_run": True,
                     "error": str(exc),
                     "error_class": "RuntimeError",
                     "note": "falha: manifesto de sucesso anterior neste diretorio nao vale para esta run",
-                })
+                }
+                if getattr(exc, "solver_info", None):
+                    failed["solver"] = exc.solver_info
+                else:
+                    failed["solver"] = {"type": getattr(args, "solver", None), "rtol": getattr(args, "rtol", None)}
+                write_run_status(prepare_output_dir(output_dir), failed)
             except Exception:
                 pass
         sys.exit(3)

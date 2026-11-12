@@ -22,12 +22,17 @@ DEFAULT_OUTPUT_DIR = "/app/output"
 USAGE = (
     "Uso: python3 run_from_inp.py arquivo.inp "
     "[--output-dir DIR | -output DIR] [--profile fc] "
-    "[--units mm-N-MPa-t-s] [--parse-only] [-debug=1]\n"
+    "[--units mm-N-MPa-t-s] [--solver lu|cg-gamg] [--rtol 1e-10] "
+    "[--parse-only] [-debug=1]\n"
     "  arquivo.inp            caminho do .inp deste job\n"
     "  --output-dir, -output  diretorio de saida deste job "
     f"(padrao: {DEFAULT_OUTPUT_DIR})\n"
     "  --profile fc           whitelist fechada e contrato de saidas FC\n"
     "  --units                obrigatorio com --profile fc (mm-N-MPa-t-s)\n"
+    "  --solver               lu (padrao) ou cg-gamg (CG + PETSc GAMG); "
+    "sem fallback\n"
+    "  --rtol                 tolerancia relativa do KSP (so cg-gamg, "
+    "obrigatorio <= 1e-10; padrao 1e-10)\n"
     "  --parse-only           valida o parse e para; NAO executa o solver\n"
     "  -debug=1               imprime diagnostico"
 )
@@ -49,6 +54,8 @@ class RunArgs:
         profile: Optional[str] = None,
         units: Optional[str] = None,
         parse_only: bool = False,
+        solver: str = "lu",
+        rtol: float = 1e-10,
     ):
         self.inp_file = inp_file
         self.output_dir = output_dir
@@ -56,6 +63,8 @@ class RunArgs:
         self.profile = profile
         self.units = units
         self.parse_only = parse_only
+        self.solver = solver
+        self.rtol = rtol
 
     def __iter__(self):
         yield self.inp_file
@@ -64,6 +73,31 @@ class RunArgs:
 
     def __getitem__(self, index):
         return (self.inp_file, self.output_dir, self.debug)[index]
+
+
+
+def normalize_solver(name: Optional[str]) -> str:
+    raw = (name or "lu").strip().lower()
+    if raw in ("", "direct", "preonly-lu"):
+        raw = "lu"
+    if raw not in ("lu", "cg-gamg"):
+        raise ValueError("solver desconhecido: {0} (use lu ou cg-gamg)".format(name))
+    return raw
+
+
+def normalize_rtol(rtol, solver: str) -> float:
+    if rtol is None:
+        val = 1e-10
+    else:
+        try:
+            val = float(rtol)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("rtol invalido: {0}".format(rtol)) from exc
+    if val != val or val in (float("inf"), float("-inf")) or val <= 0:
+        raise ValueError("rtol deve ser positivo e finito (recebido {0})".format(rtol))
+    if solver == "cg-gamg" and val > 1e-10:
+        raise ValueError("CG+GAMG exige rtol <= 1e-10 (recebido {0:g})".format(val))
+    return val
 
 
 def parse_run_args(argv: Sequence[str]) -> RunArgs:
@@ -78,6 +112,8 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
     profile: Optional[str] = None
     units: Optional[str] = None
     parse_only = False
+    solver: Optional[str] = None
+    rtol_raw: Optional[str] = None
     args: List[str] = list(argv)
     i = 0
     while i < len(args):
@@ -116,6 +152,20 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
             units = arg.split("=", 1)[1]
         elif arg in ("--parse-only",):
             parse_only = True
+        elif arg in ("--solver",):
+            i += 1
+            if i >= len(args):
+                raise ValueError("faltou o valor de --solver")
+            solver = args[i]
+        elif arg.startswith("--solver="):
+            solver = arg.split("=", 1)[1]
+        elif arg in ("--rtol",):
+            i += 1
+            if i >= len(args):
+                raise ValueError("faltou o valor de --rtol")
+            rtol_raw = args[i]
+        elif arg.startswith("--rtol="):
+            rtol_raw = arg.split("=", 1)[1]
         elif arg.startswith("-"):
             raise ValueError(f"opcao desconhecida: {arg}")
         else:
@@ -129,8 +179,11 @@ def parse_run_args(argv: Sequence[str]) -> RunArgs:
         profile = str(profile).strip().lower()
         if profile not in ("fc",):
             raise ValueError("perfil desconhecido: {0} (use fc)".format(profile))
+    solver_norm = normalize_solver(solver)
+    rtol_norm = normalize_rtol(rtol_raw, solver_norm)
     return RunArgs(
-        inp_file, output_dir, debug, profile=profile, units=units, parse_only=parse_only
+        inp_file, output_dir, debug, profile=profile, units=units,
+        parse_only=parse_only, solver=solver_norm, rtol=rtol_norm,
     )
 
 

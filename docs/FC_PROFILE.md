@@ -123,3 +123,21 @@ Correção (resultados numericos inalterados; conferido no B1 2/4/8/16 e nos tes
 
 A roda **nao foi reexecutada** neste lote. O vazamento de BC nao e mais o limitante; o pico esperado continua sendo o LU (~10 GiB na extrapolação incremental N^1,35 a partir do B1 n=16, ou ~20 GiB com fator 2). Ver nota de execucao `nota-execucao-FC-fix-memoria-2026-11-11.md`.
 
+## Solver iterativo opt-in (11/11/2026) — CG+GAMG
+
+CLI: `--solver lu|cg-gamg` (default `lu`) e `--solver cg-gamg --rtol 1e-10`. O `rtol` maior que 1e-10 e rejeitado. Nao ha fallback para LU: se o KSP nao convergir, a run termina com erro (exit ≠ 0) e `run_status.json` em `failed`.
+
+Implementacao (`src/fc_solver.py`): PETSc KSP CG + PC GAMG (aggregation), residual verdadeiro (UNPRECONDITIONED), `max_it=10000`, near-nullspace elastico com 6 modos de corpo rigido (3 translações + 3 rotações em torno da origem, ortonormalizados) via `A.setNearNullSpace` (nao `setNullSpace`, que seria incorreto apos Dirichlet). Iteracoes, `||r||`, `||b||`, `||r||/||b||` e `converged_reason` vao para `run_status.json` / `run_manifest.json`.
+
+Validacao rapida B1 (mesmas malhas do lote 3, n=8 e n=16; diferencas brutas, sem tolerancia de aceite inventada), evidencia `FC/cg-vs-lu-b1/cg_vs_lu_summary.json`:
+
+- n=8 (19683 DOFs): max|dU|=1,019e-9 (rel. 5,09e-10), max|dS|=4,97e-7 (rel. 6,40e-9); CG 27 its, `||r||/||b||`=8,53e-11, 1,12 s vs LU 3,19 s.
+- n=16 (139587 DOFs): max|dU|=6,44e-9 (rel. 3,06e-9), max|dS|=6,78e-6 (rel. 8,74e-8); CG 30 its, `||r||/||b||`=5,32e-11, 9,33 s vs LU 58,78 s.
+
+Testes do perfil FC no container `edss/fenicsx:dev`: 60 passaram. Testes de host (parser + output_dir): 12 passaram.
+
+### Execucao auxiliar E=71700 com CG+GAMG (11/11 21:18 America/Sao_Paulo)
+
+Autorizacao de Valdir 11/11 21:10 America/Sao_Paulo, retransmitida por Alex: tentar o solver iterativo, maquina liberada exceto o grok-bot. Job detached `fenics-fc-auxiliar-e71700-cggamg` (cid `3653ba2082d2…`), imagem local `edss/fenicsx:dev`, INP copia (original intacto, SHA-256 `9380e87b6073d3180b85591bcd677cd5be7d15f52a870fcc2fba6a2c3fce7e92` antes e depois). Teto `--memory`=`--memory-swap`=19,592 GiB (MemAvailable 23,592 GiB − 4 GiB), 4 CPUs. Sem push, sem Avell, sem contato com outros containers.
+
+O solve CG+GAMG convergiu (200 its, `CONVERGED_RTOL`, `||r||/||b||` verdadeiro = 2,326e-10; `solve_exit=0`, pico cgroup 1,479 GiB, ~41 s ate o manifesto). O pos-processamento *dentro* do container falhou (exit 1): a imagem nao tem `meshio`/`vtk`. O pos-processamento foi refeito no host sobre os VTU/JSON ja gravados (leitor ASCII VTU 2.2; glob do stem do PVD foi corrigido para nao pegar `_RF`/`_cell` como U). **Rotulo AUXILIAR / nao definitivo / nao validado. Gate V nao aprovado.** Tolerancias de Luiz (C2/C3/C4/energia) sao propostas, nao aceite. Detalhe e comparacao CCX (so U nodal e totais do `.dat`): `nota-execucao-FC-auxiliar-iterativo-2026-11-11.md`.
