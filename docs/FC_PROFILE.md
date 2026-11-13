@@ -15,9 +15,9 @@ Sem `--profile fc` o comportamento anterior permanece (C3D8, termico, hiperelast
 
 ## Whitelist e rejeicoes
 
-Aceita: *NODE, *ELEMENT (TYPE=C3D4 obrigatorio), *NSET, *ELSET (incluindo alias), *MATERIAL, *ELASTIC, *SOLID SECTION, *BOUNDARY (forma `nset,dof` ou `nset,dof1,dof2,valor`), *CLOAD, um *STEP, *STATIC (um incremento, periodo 1, tempo inicial 0, sem heranca), *END STEP, *NODE FILE, *EL FILE, *NODE PRINT, *OUTPUT.
+Aceita: *NODE, *ELEMENT (TYPE=C3D4 obrigatorio), *NSET, *ELSET (incluindo alias), *MATERIAL, *ELASTIC, *SOLID SECTION, *BOUNDARY (forma `nset,dof` ou `nset,dof1,dof2,valor`), *CLOAD, um *STEP, *STATIC (um incremento, periodo 1, tempo inicial 0, sem heranca), *END STEP, *NODE FILE, *EL FILE, *NODE PRINT, *EL PRINT, *OUTPUT.
 
-Ignorados **explicitamente** (manifesto, nunca silencio): *PHYSICAL CONSTANTS, *EXPANSION, parametro `INC` de *STEP.
+Ignorados **explicitamente** (manifesto, nunca silencio): *PHYSICAL CONSTANTS, *EXPANSION, *DENSITY, parametro `INC` de *STEP.
 
 Rejeita (exit 2): keyword fora da lista, *ELEMENT sem TYPE, C3D8/C3D10, multistep, *DLOAD, *NLGEOM, *HYPERELASTIC, *HEAT TRANSFER, *CONDUCTIVITY, *PLASTIC, *FREQUENCY e demais bloqueados, incrementacao *STATIC alem de um passo de periodo 1.
 

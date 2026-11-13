@@ -118,13 +118,29 @@ def test_fc_rejeita_bloqueados_e_desconhecidos(tmp_path, card, frag):
 def test_fc_ignora_metadados_explicitos(tmp_path):
     text = MIN_C3D4.replace(
         "*SOLID SECTION",
-        "*PHYSICAL CONSTANTS, ABSOLUTE ZERO=0\n*EXPANSION, ZERO=0\n2.36E-05\n*SOLID SECTION",
+        "*PHYSICAL CONSTANTS, ABSOLUTE ZERO=0\n*EXPANSION, ZERO=0\n2.36E-05\n*DENSITY\n2.7e-09\n*SOLID SECTION",
     ).replace("*STEP", "*STEP, INC=2000")
     model = parse_inp(_w(tmp_path, "meta.inp", text), profile="fc")
     keys = {item.keyword for item in model.fc_record.ignored}
     assert "PHYSICAL CONSTANTS" in keys
     assert "EXPANSION" in keys
+    assert "DENSITY" in keys
     assert any(item.keyword == "STEP" for item in model.fc_record.ignored)
+    dens = next(item for item in model.fc_record.ignored if item.keyword == "DENSITY")
+    assert "nao entra na formulacao" in dens.reason
+
+
+def test_fc_aceita_el_print(tmp_path):
+    text = MIN_C3D4.replace(
+        "*END STEP",
+        "*EL PRINT, ELSET=Eall\nS\n*END STEP",
+    )
+    model = parse_inp(_w(tmp_path, "elprint.inp", text), profile="fc")
+    kinds = [req.kind for req in model.fc_record.requests]
+    assert "el_print" in kinds
+    req = next(r for r in model.fc_record.requests if r.kind == "el_print")
+    assert req.fields == ["S"]
+    assert req.elset == "Eall"
 
 
 def test_perfil_default_ainda_aceita_heat_e_type_default(tmp_path):

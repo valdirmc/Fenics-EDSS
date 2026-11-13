@@ -489,6 +489,22 @@ def parse_inp(path: str, debug: int = 0, profile: Optional[str] = None) -> INPMo
             )
             continue
 
+        if key == "EL PRINT":
+            req_line = lineno
+            elset_m = re.search(r"ELSET\s*=\s*(\w+)", line, flags=re.IGNORECASE)
+            elset_name = elset_m.group(1) if elset_m else None
+            i += 1
+            fields = []
+            while i < len(lines) and not _is_keyword_line(lines[i]):
+                s = lines[i].strip()
+                if s and not s.startswith("**"):
+                    fields.extend([x.strip().upper() for x in s.split(",") if x.strip()])
+                i += 1
+            fc_record.requests.append(
+                OutputRequest("el_print", fields, elset=elset_name, line=req_line)
+            )
+            continue
+
         if key == "OUTPUT":
             # Parametros sao validados em validate_fc_cards: so FREQUENCY=1
             # e honrado. Reconhecer o cartao nao implica saida honrada.
@@ -510,6 +526,13 @@ def parse_inp(path: str, debug: int = 0, profile: Optional[str] = None) -> INPMo
                     "EXPANSION ignorado somente no perfil estritamente mecanico, "
                     "sem temperatura: o coeficiente nao entra na formulacao. "
                     "Cartao termico concomitante e rejeitado."
+                )
+            elif key == "DENSITY":
+                reason = (
+                    "DENSITY ignorado no perfil FC de estatica linear: a massa "
+                    "nao entra na formulacao (sem gravitacao, inercia ou "
+                    "carga de corpo). O valor e registrado como metadado, "
+                    "nao e usado no solve."
                 )
             else:
                 reason = (

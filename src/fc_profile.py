@@ -34,12 +34,14 @@ ALLOWED_KEYWORDS: Set[str] = {
     "NODE FILE",
     "EL FILE",
     "NODE PRINT",
+    "EL PRINT",
     "OUTPUT",
 }
 
 EXPLICITLY_IGNORED_KEYWORDS: Set[str] = {
     "PHYSICAL CONSTANTS",
     "EXPANSION",
+    "DENSITY",
 }
 
 EXPLICITLY_IGNORED_PARAMS = {
@@ -136,6 +138,7 @@ class OutputRequest:
     kind: str
     fields: List[str]
     nset: Optional[str] = None
+    elset: Optional[str] = None
     totals_only: bool = False
     line: int = 0
 
