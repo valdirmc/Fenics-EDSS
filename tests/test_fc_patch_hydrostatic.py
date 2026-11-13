@@ -3,13 +3,13 @@
 Os testes passam pelo leitor .inp do perfil FC (o motor nao gera INP de
 producao; fixtures de verificacao em tests/fixtures/ sao permitidas).
 
-Tolerancia numerica dos asserts (LU, campo no espaco P1/C3D4):
-  abs=1e-6 MPa ou 1e-8 mm, no mesmo espirito do teste axial.
-  NAO e aceite de Luiz, NAO congela criterio, NAO aprova Gate V.
+Tolerancias dos asserts: as formulas C4/C5/C6 propostas por Luiz (13/11),
+com u_ref/sigma_ref PROPOSTOS abaixo, ainda pendentes de congelamento pelo
+Valdir (D8). Nao sao mais folgadas que essas formulas. NAO e aceite oficial,
+NAO congela criterio, NAO aprova Gate V.
 
-Medidas (max |du|, max |dS|, sigma_vm, equilibrio, residual) sao impressas
-para o documento de proposta. Onde C0-C11 nao tem tolerancia aplicavel,
-nenhum numero novo e escolhido aqui.
+COORD (1e-9*L_ref + 2*ulp) e proposta pendente, documentada, nao assertada
+como criterio congelado.
 """
 
 from __future__ import annotations
@@ -49,11 +49,78 @@ from fc_verify_meshes import (  # noqa: E402
 )
 from run_from_inp import run_from_inp  # noqa: E402
 
-# Consistencia numerica dos testes (LU, solucao no espaco FE). Nao e C0-C11.
-ABS_U = 1e-8
-ABS_S = 1e-6
+# Equilibrio de forca: consistencia numerica, nao e C0-C11.
 ABS_F = 1e-6
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+# PROPOSTA Luiz 13/11 (revisao da sprint 2), pendente de decisao do Valdir (D8).
+# T2: u_ref = max_k |u_ex,k| = 0,222 mm; sigma_ref = max_ij |sigma_ex,ij| = 289,473684 MPa (syz).
+# T0: u_ref = p L (1-2 nu)/E = 4,857e-4 mm; sigma_ref = p = 10 MPa.
+T2_U_REF = 0.222  # mm, PROPOSTA
+T2_SIGMA_REF = 289.473684  # MPa, PROPOSTA
+T0_U_REF = 4.857e-4  # mm, PROPOSTA
+T0_SIGMA_REF = 10.0  # MPa, PROPOSTA
+T0_P = PRESSURE
+
+
+def c4_tol(u_ref, u_ref_comp):
+    """C4 proposto: |du_k| <= 1e-6*u_ref + 1e-5*|u_ref,k|. Nao congelado."""
+    return 1e-6 * float(u_ref) + 1e-5 * np.abs(np.asarray(u_ref_comp, dtype=float))
+
+
+def c5_tol(sigma_ref, s_ref_comp):
+    """C5 proposto: |dS_ij| <= 1e-5*sigma_ref + 1e-4*|S_ij,ref|. Nao congelado."""
+    return 1e-5 * float(sigma_ref) + 1e-4 * np.abs(np.asarray(s_ref_comp, dtype=float))
+
+
+def c6_tol_invariants(sigma_ref, principals_ref):
+    """C6 proposto: |dS_k| <= 1e-5*sigma_ref + 1e-4*max(|S1|,|S3|)_ref. Nao congelado."""
+    pr = np.asarray(principals_ref, dtype=float)
+    scale = np.maximum(np.abs(pr[..., 0]), np.abs(pr[..., 2]))
+    return 1e-5 * float(sigma_ref) + 1e-4 * scale
+
+
+def c6_vm_hydro_tol(p):
+    """C6/T0 proposto no pos-processador e na solucao em memoria: sigma_vm <= 1e-12*|p|."""
+    return 1e-12 * abs(float(p))
+
+
+def assert_c4(du, u_ref, u_b, label):
+    du = np.asarray(du, dtype=float)
+    tol = c4_tol(u_ref, u_b)
+    worst = float(np.max(np.abs(du) - tol))
+    assert np.all(np.abs(du) <= tol), "{0}: C4 proposto violado (max(|du|-tol)={1:.6e})".format(label, worst)
+
+
+def assert_c5(dS, sigma_ref, s_b, label):
+    dS = np.asarray(dS, dtype=float)
+    tol = c5_tol(sigma_ref, s_b)
+    worst = float(np.max(np.abs(dS) - tol))
+    assert np.all(np.abs(dS) <= tol), "{0}: C5 proposto violado (max(|dS|-tol)={1:.6e})".format(label, worst)
+
+
+def assert_c6_invariants(dpr, dvm, sigma_ref, pr_b, label):
+    dpr = np.asarray(dpr, dtype=float)
+    pr_b = np.asarray(pr_b, dtype=float)
+    tol = np.asarray(c6_tol_invariants(sigma_ref, pr_b), dtype=float)
+    if dpr.ndim == 2 and tol.ndim == 1:
+        tol_cmp = tol[:, None]
+    else:
+        tol_cmp = tol
+    worst = float(np.max(np.abs(dpr) - tol_cmp))
+    assert np.all(np.abs(dpr) <= tol_cmp), (
+        "{0}: C6 proposto (principais) violado (max(|dpr|-tol)={1:.6e})".format(label, worst)
+    )
+    vm_tol = float(np.max(tol))
+    assert float(np.max(np.abs(np.asarray(dvm, dtype=float)))) <= vm_tol, (
+        "{0}: C6 proposto (VM) violado".format(label)
+    )
+
+
+def read_fixture(name: str) -> str:
+    path = os.path.join(FIXTURES, name)
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
 
 
 def _run(tmp_path, text, name, solver="lu", rtol=1e-10):
@@ -202,9 +269,13 @@ def test_t2_patch_dirichlet_contorno(tmp_path):
     assert pack["meta"]["n_elements"] == 384
     assert int(np.count_nonzero(~pack["boundary"])) >= 27
     assert pack["vols"].min() > 0.0
-    assert max_du == pytest.approx(0.0, abs=ABS_U)
-    assert max_du_interior == pytest.approx(0.0, abs=ABS_U)
-    assert max_dS == pytest.approx(0.0, abs=ABS_S)
+    u_ex = patch_u(pack["coords"])
+    assert_c4(du, T2_U_REF, u_ex, "T2 Dirichlet")
+    assert_c4(du[~pack["boundary"]], T2_U_REF, u_ex[~pack["boundary"]], "T2 Dirichlet interiores")
+    assert_c5(dS, T2_SIGMA_REF, np.broadcast_to(s_ex, dS.shape), "T2 Dirichlet")
+    pr_ex, vm_ex = principals_algebraic(s_ex[None, :, :])
+    assert_c6_invariants(pr - pr_ex[0][None, :], np.asarray(extra["von_mises"]) - vm_ex[0],
+                         T2_SIGMA_REF, np.broadcast_to(pr_ex[0], pr.shape), "T2 Dirichlet")
     # Cisalhamentos distintos: se houvesse troca de componentes, dS explodiria.
     shear = patch_strain()
     assert len({round(shear[0, 1], 12), round(shear[0, 2], 12), round(shear[1, 2], 12)}) == 3
@@ -251,8 +322,8 @@ def test_t2_patch_12_permutacoes_pares(tmp_path):
             "min_vol": float(vols.min()),
         }
         reports.append(rec)
-        assert rec["max_du"] == pytest.approx(0.0, abs=ABS_U)
-        assert rec["max_dS"] == pytest.approx(0.0, abs=ABS_S)
+        assert_c4(du, T2_U_REF, patch_u(pack["coords"]), "T2 perm {0}".format(perm))
+        assert_c5(dS, T2_SIGMA_REF, np.broadcast_to(s_ex, dS.shape), "T2 perm {0}".format(perm))
     worst_u = max(r["max_du"] for r in reports)
     worst_s = max(r["max_dS"] for r in reports)
     print(
@@ -264,7 +335,8 @@ def test_t2_patch_12_permutacoes_pares(tmp_path):
 
 def test_t2_patch_tracao_dirichlet_parcial(tmp_path):
     pack = build_patch_traction()
-    results, out = _run(tmp_path, pack["text"], "t2_patch_tracao.inp")
+    text = read_fixture("t2_patch_tracao.inp")
+    results, out = _run(tmp_path, text, "t2_patch_tracao.inp")
     uh, extra = results[0]
     coords_mesh, u_mesh = _u_and_coords(uh)
     index = _match_original(coords_mesh, pack["coords"])
@@ -276,9 +348,10 @@ def test_t2_patch_tracao_dirichlet_parcial(tmp_path):
     max_dS = float(np.max(np.abs(dS)))
     m = _metrics_common(extra, out)
     _assert_c11_and_balance(m)
-    assert max_du == pytest.approx(0.0, abs=ABS_U)
-    assert max_du_free == pytest.approx(0.0, abs=ABS_U)
-    assert max_dS == pytest.approx(0.0, abs=ABS_S)
+    u_ex = patch_u(pack["coords"])
+    assert_c4(du, T2_U_REF, u_ex, "T2 tracao")
+    assert_c4(du[free], T2_U_REF, u_ex[free], "T2 tracao livres")
+    assert_c5(dS, T2_SIGMA_REF, np.broadcast_to(patch_sigma(), dS.shape), "T2 tracao")
     print(
         "T2 PATCH TRACAO MEASURED: n_elem={0} n_free={1} max|du|={2:.6e} "
         "max|du|_free={3:.6e} max|dS|={4:.6e} sum|R+F|={5:.6e} mom={6:.6e} res_free={7:.6e}".format(
@@ -316,15 +389,18 @@ def _hydro_check(tmp_path, solver="lu", name="t0_hydrostatic_block.inp"):
     m = _metrics_common(extra, out)
     _assert_c11_and_balance(m)
     assert pack["vols"].min() > 0.0
-    assert max_dS == pytest.approx(0.0, abs=ABS_S)
-    assert max_vm == pytest.approx(0.0, abs=ABS_S)
-    assert max_dpr == pytest.approx(0.0, abs=ABS_S)
-    assert max_du == pytest.approx(0.0, abs=ABS_U)
-    assert max_dev == pytest.approx(0.0, abs=1e-12) or max_dev <= 1e-10
-    # A linha acima usa 1e-10 so como consistencia de deformacao (adimensional ~4.8e-5).
-    # Nao substitui o criterio proposto de Luiz para VM.
-    luiz_vm_tol = 1e-12 * abs(p)
+    u_ex = hydrostatic_u(pack["coords"], p)
+    assert_c4(du, T0_U_REF, u_ex, "T0 {0}".format(solver))
+    assert_c5(dS, T0_SIGMA_REF, np.broadcast_to(s_ex, dS.shape), "T0 {0}".format(solver))
+    pr_ex, vm_ex = principals_algebraic(s_ex[None, :, :])
+    assert_c6_invariants(pr - pr_ex[0][None, :], vm - vm_ex[0],
+                         T0_SIGMA_REF, np.broadcast_to(pr_ex[0], pr.shape), "T0 {0}".format(solver))
+    luiz_vm_tol = c6_vm_hydro_tol(p)
+    # C6/T0 proposto: sigma_vm em memoria <= 1e-12*|p| (nao julga o CCX impresso).
+    assert max_vm <= luiz_vm_tol, "T0 {0}: C6 proposto VM {1:.6e} > {2:.6e}".format(solver, max_vm, luiz_vm_tol)
     meets_luiz_vm = bool(max_vm <= luiz_vm_tol)
+    # Deformacao volumetrica: consistencia do campo no espaco P1 (nao e C0-C11).
+    assert max_dev <= 1e-12
     report = {
         "solver": solver,
         "p": p,
@@ -365,33 +441,40 @@ def test_fixtures_inp_existem_e_sao_c3d4():
         "t2_patch_tracao.inp",
         "t0_hydrostatic_block.inp",
     )
+    builders = {
+        "t2_patch_block.inp": build_patch_dirichlet,
+        "t2_patch_tracao.inp": build_patch_traction,
+        "t0_hydrostatic_block.inp": build_hydrostatic,
+    }
     for name in needed:
         path = os.path.join(FIXTURES, name)
         assert os.path.isfile(path), path
-        text = open(path, encoding="utf-8").read()
+        text = read_fixture(name)
         assert "TYPE=C3D4" in text
         assert "*DLOAD" not in text
         assert "C3D8" not in text and "C3D10" not in text
+        generated = builders[name]()["text"]
+        assert text == generated, "{0} diverge do gerador atual".format(name)
 
 
 def test_t2_e_t0_via_fixture_arquivo(tmp_path):
-    """Garante que os .inp gravados em tests/fixtures/ passam no leitor FC."""
-    patch = os.path.join(FIXTURES, "t2_patch_block.inp")
-    hydro = os.path.join(FIXTURES, "t0_hydrostatic_block.inp")
-    if not (os.path.isfile(patch) and os.path.isfile(hydro)):
-        pytest.skip("fixtures ainda nao geradas")
-    for src, name, kind in (
-        (patch, "fix_patch.inp", "patch"),
-        (hydro, "fix_hydro.inp", "hydro"),
-    ):
-        text = open(src, encoding="utf-8").read()
+    """Resolve e carrega as fixtures gravadas, inclusive a de tracao."""
+    cases = (
+        ("t2_patch_block.inp", "fix_patch.inp", "patch"),
+        ("t2_patch_tracao.inp", "fix_tracao.inp", "tracao"),
+        ("t0_hydrostatic_block.inp", "fix_hydro.inp", "hydro"),
+    )
+    for src_name, name, kind in cases:
+        src = os.path.join(FIXTURES, src_name)
+        assert os.path.isfile(src), src
+        text = read_fixture(src_name)
         results, out = _run(tmp_path, text, name)
         _uh, extra = results[0]
         m = _metrics_common(extra, out)
         _assert_c11_and_balance(m)
-        if kind == "patch":
+        if kind in {"patch", "tracao"}:
             dS = np.asarray(extra["stress_cells"]) - patch_sigma()[None, :, :]
-            assert float(np.max(np.abs(dS))) == pytest.approx(0.0, abs=ABS_S)
+            assert_c5(dS, T2_SIGMA_REF, np.broadcast_to(patch_sigma(), dS.shape), kind)
         else:
             vm = np.asarray(extra["von_mises"])
-            assert float(np.max(np.abs(vm))) == pytest.approx(0.0, abs=ABS_S)
+            assert float(np.max(np.abs(vm))) <= c6_vm_hydro_tol(T0_P)

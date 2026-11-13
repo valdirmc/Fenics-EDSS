@@ -9,6 +9,8 @@ O perfil FC rejeita *DLOAD: pressao e tracao entram como *CLOAD consistentes
 from __future__ import annotations
 
 import itertools
+import math
+from collections import defaultdict
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
@@ -290,14 +292,32 @@ def boundary_triangles(coords: np.ndarray, cells: np.ndarray):
     return tris
 
 
+def format_force(v: float) -> str:
+    """15 casas no expoente: evita deriva de 1 ULP na 16.a casa ao regenerar."""
+    return "{0:.15e}".format(float(v))
+
+
+def _accumulate_forces(contribs):
+    """Soma contribuicoes com math.fsum, faces em ordem deterministica."""
+    buckets = defaultdict(lambda: ([], [], []))
+    for nid, force in contribs:
+        for k in range(3):
+            buckets[int(nid)][k].append(float(force[k]))
+    return {
+        nid: np.array([math.fsum(comps[k]) for k in range(3)], dtype=float)
+        for nid, comps in buckets.items()
+    }
+
+
 def pressure_cloads(coords: np.ndarray, cells: np.ndarray, p: float) -> Dict[int, np.ndarray]:
     """Tracao t = -p n (n externa) com forcas consistentes F_i = A t / 3."""
-    loads: Dict[int, np.ndarray] = {}
-    for ids, area, nhat in boundary_triangles(coords, cells):
+    contribs = []
+    faces = sorted(boundary_triangles(coords, cells), key=lambda t: tuple(sorted(t[0])))
+    for ids, area, nhat in faces:
         force = (area / 3.0) * (-p * nhat)
         for nid in ids:
-            loads[nid] = loads.get(nid, np.zeros(3, dtype=float)) + force
-    return loads
+            contribs.append((int(nid), force))
+    return _accumulate_forces(contribs)
 
 
 def traction_cloads(
@@ -313,8 +333,9 @@ def traction_cloads(
     planos apos a perturbacao.
     """
     want = set(faces)
-    loads: Dict[int, np.ndarray] = {}
-    for ids, area, nhat in boundary_triangles(coords, cells):
+    contribs = []
+    tris = sorted(boundary_triangles(coords, cells), key=lambda t: tuple(sorted(t[0])))
+    for ids, area, nhat in tris:
         labels = []
         for name in ("x0", "xL", "y0", "yL", "z0", "zL"):
             if all(bool(on_faces[name][int(nid)]) for nid in ids):
@@ -324,8 +345,8 @@ def traction_cloads(
         t = sigma @ nhat
         force = (area / 3.0) * t
         for nid in ids:
-            loads[nid] = loads.get(nid, np.zeros(3, dtype=float)) + force
-    return loads
+            contribs.append((int(nid), force))
+    return _accumulate_forces(contribs)
 
 
 def symmetry_bcs(coords: np.ndarray, length: float = L, atol: float = 1e-9):
@@ -413,7 +434,7 @@ def inp_text(
         for nid0, f in sorted(loads.items()):
             for comp, val in enumerate(f, start=1):
                 if val != 0.0:
-                    lines.append("{0}, {1}, {2:.16e}".format(nid0 + 1, comp, val))
+                    lines.append("{0}, {1}, {2}".format(nid0 + 1, comp, format_force(val)))
     lines.extend([
         "*OUTPUT, FREQUENCY=1",
         "*NODE FILE",
